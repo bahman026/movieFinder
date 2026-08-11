@@ -1,0 +1,8 @@
+dist/
+*.exe
+.git/
+.idea/
+.vscode/
+README.md
+certs/README.md
+
