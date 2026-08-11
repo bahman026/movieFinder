@@ -1,0 +1,104 @@
+# MovieFinder
+
+A Windows desktop client (Go + [Fyne](https://fyne.io)) for browsing, searching and downloading from the `playstore` movie API. Built inside Docker, so no Go toolchain is needed on the machine.
+
+## Build
+
+```powershell
+.\build.ps1
+```
+
+or directly:
+
+```powershell
+docker build --target export --output "type=local,dest=dist" .
+```
+
+The result is a single self-contained `dist\MovieFinder.exe` — no runtime, no DLLs, no installer.
+
+The first build downloads the Go image and the mingw cross-compiler (a few minutes). Later builds reuse the layer cache. The build also emits `dist\go.sum`; `build.ps1` moves it into the repo root so dependency versions stay pinned from then on.
+
+### Tests
+
+```powershell
+docker build --target build -t moviefinder-build .
+docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-build `
+    go test ./internal/api/... ./internal/config/...
+```
+
+`./internal/ui` is excluded — Fyne needs X11/GL headers that the build image does not carry; that package only compiles under the Windows cross-build.
+
+### Two things this machine needed
+
+Both are already handled in the Dockerfile, but worth knowing if you build elsewhere:
+
+1. **Fiddler was intercepting the container's HTTPS.** Windows trusts `DO_NOT_TRUST_FiddlerRoot`, a fresh Linux container does not, so module downloads failed with `x509: certificate signed by unknown authority`. `.\export-proxy-ca.ps1` pulls that CA out of the Windows store into `certs\`, and the build trusts whatever is in there. The certificate is trusted **only inside the build image** — the shipped `.exe` uses the Windows certificate store.
+
+2. **`proxy.golang.org` is geo-blocked from this network.** Its module zips come from Google Cloud Storage, which answers `403 ... this service is not available in your location`. The build therefore uses `GOPROXY=https://goproxy.cn,direct`. Override it with `--build-arg GOPROXY=...` if you have a better mirror.
+
+## What it does
+
+- **Browse** the main listing, one page at a time (`get_movies`)
+- **Search** films, series and TV channels in one list (`search`)
+- **Details** for the selected title — rating, genre, country, director, cast, description
+- **Download** any of the title's files, with a progress bar, to your Downloads folder
+- **Copy link** for use in another downloader
+- **Automatic host failover** between mirrors
+
+## Host failover
+
+`Settings → Hosts` holds one host per line, tried top to bottom:
+
+```
+http://cdntest.host4dns.n2bapp.ir
+http://mjapiservers.com
+```
+
+The client keeps using whichever host answered last and only moves down the list when that one stops responding, so a dead mirror costs one failed request rather than one per call. The status bar shows which server is currently serving you.
+
+Failover triggers on connection refused, timeout, DNS failure, TLS failure and `5xx`. It deliberately does **not** trigger on `4xx` or on an API-level error, since those would come back identically from every mirror — the error is reported instead of silently retried.
+
+**Test each host** in Settings probes every host individually rather than through the failover path, so a working mirror cannot hide a broken one.
+
+### Why the hosts are `http://`
+
+Both domains resolve to the same IP and both serve the API fine over HTTP. Over HTTPS they present a certificate issued for a different name, so verification fails (`SEC_E_WRONG_PRINCIPAL` / `x509: certificate is valid for ...`).
+
+There is a `Skip TLS certificate verification` toggle for `https://` hosts, but be clear about what it buys: with the wrong certificate, HTTPS gives you encryption without authentication — you cannot tell the real server from anyone able to intercept the connection. Neither setting gives you an authenticated channel to these servers. Fixing the certificate on the server is the only real answer; until then HTTP is at least honest about it.
+
+## API notes
+
+Base path `/playstore/api`, with `api_secret_key`, `version`, `country` and `sp` sent on every request.
+
+| Endpoint | Parameters | Returns |
+| --- | --- | --- |
+| `get_movies` | `page` | bare array of titles |
+| `search` | `q` | `{movie:[], tvseries:[], tv_channels:[]}` |
+| `get_single_details` | `type` (`movie`/`tvseries`), `id` | one title with `download_links[]`, `videos[]`, `genre[]`, `cast[]`, … |
+| `get_movie_by_genre_id` | `id`, `page` | bare array of titles |
+| `get_slider` | — | `{slider_type, data:[]}` |
+
+Quirks the client works around:
+
+- **Every scalar is a JSON string**, including numbers and the `is_tvseries` / `enable_download` flags.
+- **Errors arrive with HTTP 200**, as `{"status":"error","message":"…"}`. The status code alone never reveals a failure, so every response body is checked for that envelope.
+- **`search` is not paged** — it returns all matches at once — so the pager is disabled while a search is active.
+- **Some field names are misleading.** `writer` on a listing entry is the localized title. `resolution` on a download link is a decorative `⇩` glyph, with the real quality in `label`. `file_size` is a bare number of megabytes and is often `null`.
+- **Download URLs expire.** They point at separate `dl*.downlaodhaa.net` file hosts and are signed with `md5` + `expires`, so the app fetches them fresh with the title's details rather than storing them. If a download fails after the window has been open a long time, reselect the title to get a fresh link.
+
+The `Downloads (n)` list in the detail pane comes straight from `download_links`; pick one in the dropdown and hit Download.
+
+## Layout
+
+```
+cmd/moviefinder/main.go     entry point
+internal/api/client.go      endpoints, host failover, download streaming
+internal/api/model.go       Movie / Detail types, error-envelope detection
+internal/api/client_test.go failover and decoding tests
+internal/config/config.go   settings load/save (%APPDATA%)
+internal/ui/app.go          window, table, detail pane, download picker
+internal/ui/settings.go     settings dialog and per-host connection test
+Dockerfile                  mingw cross-compile to a Windows .exe
+build.ps1                   one-command build wrapper
+export-proxy-ca.ps1         exports the local TLS-interception CA for the build
+```
