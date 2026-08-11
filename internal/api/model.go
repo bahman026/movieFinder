@@ -166,6 +166,14 @@ type Detail struct {
 // DownloadsEnabled reports whether the API offers download links for this title.
 func (d Detail) DownloadsEnabled() bool { return d.EnableDownload == "1" }
 
+// Year is the release year, tolerating both "2016-12-16" and "2016".
+func (d Detail) Year() string {
+	if len(d.Release) >= 4 {
+		return d.Release[:4]
+	}
+	return d.Release
+}
+
 // searchResponse is the shape of the /search endpoint, which splits results by
 // category instead of returning a flat list.
 type searchResponse struct {

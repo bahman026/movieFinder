@@ -153,53 +153,65 @@ func (c *Client) Details(ctx context.Context, kind, id string) (Detail, error) {
 	return detail, nil
 }
 
-// Download streams a link to w, reporting bytes written through onProgress.
-// total is -1 when the server sends no Content-Length.
-func (c *Client) Download(ctx context.Context, link DownloadLink, w io.Writer, onProgress func(written, total int64)) error {
-	if strings.TrimSpace(link.URL) == "" {
-		return fmt.Errorf("this link has no download URL")
+// Image fetches a poster or thumbnail.
+//
+// Detail responses hand back image URLs on a CDN host that no longer resolves,
+// while the same path is served by the API host itself, so a failed fetch is
+// retried against the host that is currently answering.
+func (c *Client) Image(ctx context.Context, rawURL string) ([]byte, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil, fmt.Errorf("no image URL")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
-	if err != nil {
-		return fmt.Errorf("build download request: %w", err)
+	body, err := c.fetchImage(ctx, rawURL)
+	if err == nil {
+		return body, nil
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	parsed, parseErr := url.Parse(rawURL)
+	if parseErr != nil || parsed.Path == "" {
+		return nil, err
+	}
+	fallback := c.ActiveHost() + parsed.Path
+	if fallback == rawURL {
+		return nil, err
+	}
+	if body, altErr := c.fetchImage(ctx, fallback); altErr == nil {
+		return body, nil
+	}
+	return nil, err
+}
+
+func (c *Client) fetchImage(ctx context.Context, target string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "image/*")
 	req.Header.Set("User-Agent", userAgent)
 
-	// A file transfer can far outrun the API timeout, so this client is
-	// untimed and cancellation goes through ctx instead. The transport is
-	// shared, keeping the TLS settings consistent.
-	resp, err := (&http.Client{Transport: c.http.Transport}).Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("download: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download: server answered %s", resp.Status)
+		return nil, fmt.Errorf("image %s: %s", target, resp.Status)
 	}
-
-	total := resp.ContentLength
-	var written int64
-	buf := make([]byte, 64*1024)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
-				return err
-			}
-			written += int64(n)
-			if onProgress != nil {
-				onProgress(written, total)
-			}
-		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
+	// Posters are small; the cap keeps a misdirected URL from filling memory.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, err
 	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("image %s: empty response", target)
+	}
+	return body, nil
 }
 
 const userAgent = "MovieFinder/0.1"

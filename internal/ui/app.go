@@ -4,11 +4,9 @@ package ui
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
@@ -19,6 +17,7 @@ import (
 
 	"github.com/adlas/moviefinder/internal/api"
 	"github.com/adlas/moviefinder/internal/config"
+	"github.com/adlas/moviefinder/internal/opensubtitles"
 )
 
 const appID = "at.adlas.moviefinder"
@@ -28,8 +27,10 @@ type UI struct {
 	app    fyne.App
 	window fyne.Window
 
-	cfg    config.Config
-	client *api.Client
+	cfg       config.Config
+	client    *api.Client
+	subtitles *opensubtitles.Client
+	images    *imageCache
 
 	// mu guards everything the loader goroutines write and the widget
 	// callbacks read on the UI thread.
@@ -46,13 +47,12 @@ type UI struct {
 	cancelLoad   context.CancelFunc
 	cancelDetail context.CancelFunc
 
-	table      *widget.Table
+	grid       *widget.GridWrap
 	search     *widget.Entry
 	status     *widget.Label
 	hostLabel  *widget.Label
-	progress   *widget.ProgressBar
 	info       *widget.RichText
-	linkSelect *widget.Select
+	linkBox    *fyne.Container
 	pageLabel  *widget.Label
 	prevButton *widget.Button
 	nextButton *widget.Button
@@ -64,9 +64,18 @@ func Run() {
 
 	a := fyneapp.NewWithID(appID)
 	w := a.NewWindow("MovieFinder")
-	w.Resize(fyne.NewSize(1100, 680))
+	w.Resize(fyne.NewSize(1180, 760))
 
-	u := &UI{app: a, window: w, cfg: cfg, client: api.New(cfg), page: 1, selected: -1}
+	u := &UI{
+		app:       a,
+		window:    w,
+		cfg:       cfg,
+		client:    api.New(cfg),
+		subtitles: opensubtitles.New(cfg.OpenSubtitlesAPIKey),
+		images:    newImageCache(),
+		page:      1,
+		selected:  -1,
+	}
 	w.SetContent(u.build())
 	w.SetMaster()
 
@@ -102,14 +111,12 @@ func (u *UI) build() fyne.CanvasObject {
 		u.search,
 	)
 
-	u.table = u.buildTable()
-	split := container.NewHSplit(u.table, u.buildDetailPane())
-	split.Offset = 0.62
+	u.grid = u.buildGrid()
+	split := container.NewHSplit(u.grid, u.buildDetailPane())
+	split.Offset = 0.63
 
 	u.status = widget.NewLabel("Loading…")
 	u.hostLabel = widget.NewLabel("")
-	u.progress = widget.NewProgressBar()
-	u.progress.Hide()
 
 	u.pageLabel = widget.NewLabel("Page 1")
 	u.prevButton = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
@@ -124,93 +131,84 @@ func (u *UI) build() fyne.CanvasObject {
 
 	statusBar := container.NewBorder(nil, nil, nil,
 		container.NewHBox(u.prevButton, u.pageLabel, u.nextButton),
-		container.NewVBox(u.status, u.hostLabel, u.progress),
+		container.NewVBox(u.status, u.hostLabel),
 	)
 
 	return container.NewBorder(toolbar, statusBar, nil, nil, split)
 }
 
-func (u *UI) buildDetailPane() fyne.CanvasObject {
-	u.info = widget.NewRichTextFromMarkdown("_Select a title to see its details._")
-	u.info.Wrapping = fyne.TextWrapWord
-
-	u.linkSelect = widget.NewSelect(nil, nil)
-	u.linkSelect.PlaceHolder = "No download links"
-	u.linkSelect.Disable()
-
-	downloadButton := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), func() {
-		u.downloadSelectedLink()
-	})
-	copyButton := widget.NewButtonWithIcon("Copy link", theme.ContentCopyIcon(), func() {
-		u.copySelectedLink()
-	})
-
-	return container.NewBorder(
-		widget.NewLabelWithStyle("Details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewVBox(u.linkSelect, container.NewHBox(downloadButton, copyButton)),
-		nil, nil,
-		container.NewVScroll(u.info),
-	)
-}
-
-var columns = []struct {
-	title string
-	width float32
-	value func(api.Movie) string
-}{
-	{"Title", 300, func(m api.Movie) string { return m.Title }},
-	{"Year", 60, func(m api.Movie) string { return m.Year() }},
-	{"IMDb", 60, func(m api.Movie) string { return m.IMDBRating }},
-	{"Runtime", 90, func(m api.Movie) string { return m.Runtime }},
-	{"Kind", 70, func(m api.Movie) string { return m.KindLabel() }},
-	{"Quality", 130, func(m api.Movie) string { return m.VideoQuality }},
-}
-
-func (u *UI) buildTable() *widget.Table {
-	table := widget.NewTable(
-		func() (int, int) {
+func (u *UI) buildGrid() *widget.GridWrap {
+	grid := widget.NewGridWrap(
+		func() int {
 			u.mu.RLock()
 			defer u.mu.RUnlock()
-			return len(u.movies), len(columns)
+			return len(u.movies)
 		},
 		func() fyne.CanvasObject {
-			label := widget.NewLabel("")
-			label.Truncation = fyne.TextTruncateEllipsis
-			return label
+			return newPosterCard()
 		},
-		func(id widget.TableCellID, cell fyne.CanvasObject) {
-			label, ok := cell.(*widget.Label)
+		func(id widget.GridWrapItemID, item fyne.CanvasObject) {
+			movie, ok := u.movieAt(int(id))
 			if !ok {
 				return
 			}
-			movie, ok := u.movieAt(id.Row)
-			if !ok || id.Col >= len(columns) {
-				label.SetText("")
-				return
+			if card, ok := item.(*posterCard); ok {
+				card.set(movie, u.loadPoster)
 			}
-			label.SetText(columns[id.Col].value(movie))
 		},
 	)
-
-	table.ShowHeaderRow = true
-	table.CreateHeader = func() fyne.CanvasObject {
-		return widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	}
-	table.UpdateHeader = func(id widget.TableCellID, cell fyne.CanvasObject) {
-		if label, ok := cell.(*widget.Label); ok && id.Col >= 0 && id.Col < len(columns) {
-			label.SetText(columns[id.Col].title)
-		}
-	}
-	for i, col := range columns {
-		table.SetColumnWidth(i, col.width)
-	}
-	table.OnSelected = func(id widget.TableCellID) {
+	grid.OnSelected = func(id widget.GridWrapItemID) {
 		u.mu.Lock()
-		u.selected = id.Row
+		u.selected = int(id)
 		u.mu.Unlock()
-		u.loadDetail(id.Row)
+		u.loadDetail(int(id))
 	}
-	return table
+	return grid
+}
+
+// loadPoster serves a poster from cache, or fetches it in the background.
+func (u *UI) loadPoster(url string, apply func(fyne.Resource)) {
+	if res, ok := u.images.get(url); ok {
+		apply(res)
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		data, err := u.client.Image(ctx, url)
+		if err != nil {
+			return // a missing poster is not worth interrupting the user for
+		}
+		res := fyne.NewStaticResource(url, data)
+		u.images.put(url, res)
+
+		fyne.Do(func() { apply(res) })
+	}()
+}
+
+func (u *UI) buildDetailPane() fyne.CanvasObject {
+	u.info = widget.NewRichTextFromMarkdown("_Select a title to see its links._")
+	u.info.Wrapping = fyne.TextWrapWord
+
+	subtitlesButton := widget.NewButtonWithIcon("Find Subtitles", theme.SearchIcon(), func() {
+		u.showSubtitles()
+	})
+
+	u.linkBox = container.NewVBox()
+
+	content := container.NewVBox(
+		u.info,
+		subtitlesButton,
+		widget.NewSeparator(),
+		u.linkBox,
+	)
+
+	return container.NewBorder(
+		widget.NewLabelWithStyle("Details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		nil, nil, nil,
+		container.NewVScroll(content),
+	)
 }
 
 // setQuery switches between browsing and searching.
@@ -238,7 +236,7 @@ func (u *UI) reload(page int) {
 		page = 1 // the search endpoint is not paged
 		u.setStatus("Searching for " + query + "…")
 	} else {
-		u.setStatus("Loading page " + fmt.Sprint(page) + "…")
+		u.setStatus(fmt.Sprintf("Loading page %d…", page))
 	}
 
 	go func() {
@@ -269,16 +267,15 @@ func (u *UI) reload(page int) {
 			u.selected = -1
 			u.mu.Unlock()
 
-			u.table.UnselectAll()
-			u.table.ScrollToTop()
-			u.table.Refresh()
-			u.clearDetail("_Select a title to see its details._")
+			u.grid.UnselectAll()
+			u.grid.Refresh()
+			u.grid.ScrollToTop()
+			u.clearDetail("_Select a title to see its links._")
 
 			u.pageLabel.SetText(fmt.Sprintf("Page %d", page))
-			// The search endpoint returns everything at once, so paging is
-			// meaningless there.
 			switch {
 			case searching:
+				// The search endpoint returns everything at once.
 				u.prevButton.Disable()
 				u.nextButton.Disable()
 			default:
@@ -309,9 +306,9 @@ func (u *UI) reload(page int) {
 	}()
 }
 
-// loadDetail fetches the full record for a row and fills the detail pane.
-func (u *UI) loadDetail(row int) {
-	movie, ok := u.movieAt(row)
+// loadDetail fetches the full record for a card and fills the detail pane.
+func (u *UI) loadDetail(index int) {
+	movie, ok := u.movieAt(index)
 	if !ok {
 		return
 	}
@@ -322,7 +319,7 @@ func (u *UI) loadDetail(row int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	u.cancelDetail = cancel
 
-	u.clearDetail("## " + movie.Title + "\n\n_Loading details…_")
+	u.clearDetail("## " + movie.Title + "\n\n_Loading…_")
 
 	go func() {
 		detail, err := u.client.Details(ctx, movie.Kind(), movie.ID)
@@ -342,24 +339,50 @@ func (u *UI) loadDetail(row int) {
 			u.mu.Unlock()
 
 			u.info.ParseMarkdown(renderDetail(detail))
-
-			options := make([]string, 0, len(detail.DownloadLinks))
-			for _, link := range detail.DownloadLinks {
-				options = append(options, link.Describe())
-			}
-			u.linkSelect.Options = options
-			if len(options) == 0 {
-				u.linkSelect.PlaceHolder = "No download links"
-				u.linkSelect.ClearSelected()
-				u.linkSelect.Disable()
-			} else {
-				u.linkSelect.PlaceHolder = "Choose a file"
-				u.linkSelect.Enable()
-				u.linkSelect.SetSelectedIndex(0)
-			}
-			u.linkSelect.Refresh()
+			u.showLinks(detail.DownloadLinks)
 		})
 	}()
+}
+
+// showLinks lists every link with its URL and a copy button.
+func (u *UI) showLinks(links []api.DownloadLink) {
+	u.linkBox.RemoveAll()
+
+	if len(links) == 0 {
+		u.linkBox.Add(widget.NewLabel("No links for this title."))
+		u.linkBox.Refresh()
+		return
+	}
+
+	header := widget.NewLabelWithStyle(
+		fmt.Sprintf("Links (%d)", len(links)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	u.linkBox.Add(header)
+
+	for _, link := range links {
+		link := link
+
+		label := widget.NewLabel(link.Describe())
+		label.TextStyle = fyne.TextStyle{Bold: true}
+
+		// A disabled entry rather than a label, so the URL stays selectable
+		// for copying by hand while being uneditable.
+		field := widget.NewEntry()
+		field.SetText(link.URL)
+		field.Wrapping = fyne.TextWrapOff
+		field.Disable()
+
+		copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+			u.window.Clipboard().SetContent(link.URL)
+			u.setStatus("Copied: " + link.Describe())
+		})
+
+		u.linkBox.Add(container.NewVBox(
+			container.NewBorder(nil, nil, nil, copyButton, label),
+			field,
+			widget.NewSeparator(),
+		))
+	}
+	u.linkBox.Refresh()
 }
 
 func renderDetail(d api.Detail) string {
@@ -380,74 +403,10 @@ func renderDetail(d api.Detail) string {
 		writeField(&b, "Cast", truncate(cast, 300))
 	}
 
-	if len(d.DownloadLinks) > 0 {
-		fmt.Fprintf(&b, "\n### Downloads (%d)\n\n", len(d.DownloadLinks))
-		for _, link := range d.DownloadLinks {
-			fmt.Fprintf(&b, "- %s\n", link.Describe())
-		}
-	} else if !d.DownloadsEnabled() {
-		b.WriteString("\n_Downloads are disabled for this title._\n")
-	}
-
 	if d.Description != "" {
-		fmt.Fprintf(&b, "\n### Description\n\n%s\n", d.Description)
+		fmt.Fprintf(&b, "\n%s\n", d.Description)
 	}
 	return b.String()
-}
-
-func (u *UI) downloadSelectedLink() {
-	link, ok := u.selectedLink()
-	if !ok {
-		u.setStatus("Choose a file to download first.")
-		return
-	}
-
-	u.mu.RLock()
-	title := u.detail.Title
-	u.mu.RUnlock()
-
-	target := filepath.Join(u.cfg.ResolveDownloadDir(), downloadFileName(title, link))
-	out, err := os.Create(target)
-	if err != nil {
-		dialog.ShowError(err, u.window)
-		return
-	}
-
-	u.progress.SetValue(0)
-	u.progress.Show()
-	u.setStatus("Downloading " + filepath.Base(target) + "…")
-
-	go func() {
-		defer out.Close()
-
-		err := u.client.Download(context.Background(), link, out, func(written, total int64) {
-			if total <= 0 {
-				return
-			}
-			fyne.Do(func() { u.progress.SetValue(float64(written) / float64(total)) })
-		})
-
-		fyne.Do(func() {
-			u.progress.Hide()
-			if err != nil {
-				os.Remove(target)
-				u.setStatus("Download failed: " + firstLine(err.Error()))
-				dialog.ShowError(err, u.window)
-				return
-			}
-			u.setStatus("Saved to " + target)
-		})
-	}()
-}
-
-func (u *UI) copySelectedLink() {
-	link, ok := u.selectedLink()
-	if !ok {
-		u.setStatus("Choose a file first.")
-		return
-	}
-	u.window.Clipboard().SetContent(link.URL)
-	u.setStatus("Link copied.")
 }
 
 func (u *UI) clearDetail(markdown string) {
@@ -456,31 +415,17 @@ func (u *UI) clearDetail(markdown string) {
 	u.links = nil
 	u.detail = api.Detail{}
 	u.mu.Unlock()
-	u.linkSelect.Options = nil
-	u.linkSelect.PlaceHolder = "No download links"
-	u.linkSelect.ClearSelected()
-	u.linkSelect.Disable()
-	u.linkSelect.Refresh()
+	u.linkBox.RemoveAll()
+	u.linkBox.Refresh()
 }
 
-func (u *UI) movieAt(row int) (api.Movie, bool) {
+func (u *UI) movieAt(index int) (api.Movie, bool) {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	if row < 0 || row >= len(u.movies) {
+	if index < 0 || index >= len(u.movies) {
 		return api.Movie{}, false
 	}
-	return u.movies[row], true
-}
-
-// selectedLink resolves the link picker's choice back to a DownloadLink.
-func (u *UI) selectedLink() (api.DownloadLink, bool) {
-	index := u.linkSelect.SelectedIndex()
-	u.mu.RLock()
-	defer u.mu.RUnlock()
-	if index < 0 || index >= len(u.links) {
-		return api.DownloadLink{}, false
-	}
-	return u.links[index], true
+	return u.movies[index], true
 }
 
 func (u *UI) currentPage() int {
@@ -527,37 +472,4 @@ func firstLine(s string) string {
 		return s[:i] + " …"
 	}
 	return s
-}
-
-// downloadFileName builds a save name from the title and the chosen link,
-// keeping the extension the URL implies.
-func downloadFileName(title string, link api.DownloadLink) string {
-	name := strings.TrimSpace(title)
-	if name == "" {
-		name = "download"
-	}
-	if label := strings.TrimSpace(link.Label); label != "" {
-		name += " " + label
-	}
-
-	// Sanitise and shorten the stem before reattaching the extension, so a
-	// long title cannot truncate the extension away.
-	return safeFileName(name) + unsafeName.ReplaceAllString(link.Ext(), "_")
-}
-
-var unsafeName = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
-
-// safeFileName strips the characters Windows rejects in a path so an
-// API-supplied name cannot escape the download folder.
-func safeFileName(name string) string {
-	name = filepath.Base(strings.TrimSpace(name))
-	name = unsafeName.ReplaceAllString(name, "_")
-	name = strings.Trim(name, ". ")
-	if name == "" {
-		return "download.bin"
-	}
-	if len(name) > 150 {
-		name = name[:150]
-	}
-	return name
 }
