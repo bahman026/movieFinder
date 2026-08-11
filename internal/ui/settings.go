@@ -14,6 +14,7 @@ import (
 
 	"github.com/adlas/moviefinder/internal/api"
 	"github.com/adlas/moviefinder/internal/config"
+	"github.com/adlas/moviefinder/internal/opensubtitles"
 )
 
 // showSettings opens the configuration dialog and applies the result.
@@ -30,13 +31,16 @@ func (u *UI) showSettings() {
 	version := entryWith(cfg.Version, "4.5.0")
 	country := entryWith(cfg.Country, "other")
 	timeout := entryWith(strconv.Itoa(cfg.TimeoutSeconds), "30")
-	downloadDir := entryWith(cfg.DownloadDir, cfg.ResolveDownloadDir())
 
 	sp := widget.NewCheck("Send sp=true", nil)
 	sp.SetChecked(cfg.SP)
 
 	insecure := widget.NewCheck("Skip TLS certificate verification", nil)
 	insecure.SetChecked(cfg.InsecureTLS)
+
+	subtitlesKey := widget.NewPasswordEntry()
+	subtitlesKey.SetText(cfg.OpenSubtitlesAPIKey)
+	subtitlesKey.SetPlaceHolder("get a free key at " + opensubtitles.RegisterURL)
 
 	// collect turns the current field values into a Config.
 	collect := func() config.Config {
@@ -50,7 +54,7 @@ func (u *UI) showSettings() {
 		next.Country = strings.TrimSpace(country.Text)
 		next.SP = sp.Checked
 		next.InsecureTLS = insecure.Checked
-		next.DownloadDir = downloadDir.Text
+		next.OpenSubtitlesAPIKey = strings.TrimSpace(subtitlesKey.Text)
 		if n, err := strconv.Atoi(timeout.Text); err == nil && n > 0 {
 			next.TimeoutSeconds = n
 		}
@@ -105,8 +109,8 @@ func (u *UI) showSettings() {
 		{Text: "", Widget: sp},
 		{Text: "", Widget: insecure, HintText: "Only needed for https:// hosts, which currently serve a certificate for a different name."},
 		{Text: "Timeout (s)", Widget: timeout},
-		{Text: "Save files to", Widget: downloadDir},
 		{Text: "", Widget: container.NewVBox(testButton, testResult)},
+		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Needed for the Subtitles button. Free account + \"consumer\" app at " + opensubtitles.RegisterURL},
 	}
 
 	d := dialog.NewForm("Settings", "Save", "Cancel", form, func(ok bool) {
@@ -125,6 +129,7 @@ func (u *UI) showSettings() {
 
 		u.cfg = next
 		u.client = api.New(next)
+		u.subtitles = opensubtitles.New(next.OpenSubtitlesAPIKey)
 		u.setStatus("Settings saved.")
 		u.reload(1)
 	}, u.window)
