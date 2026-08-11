@@ -39,9 +39,10 @@ type Config struct {
 
 	TimeoutSeconds int `json:"timeout_seconds"`
 
-	// DownloadDir is where saved files land. Empty means the user's Downloads
-	// folder.
-	DownloadDir string `json:"download_dir"`
+	// OpenSubtitlesAPIKey enables the subtitle search/download feature. Get a
+	// free one at https://www.opensubtitles.com/en/consumers — without it the
+	// API refuses every request.
+	OpenSubtitlesAPIKey string `json:"opensubtitles_api_key"`
 }
 
 // Default returns the working settings for the known API.
@@ -141,21 +142,4 @@ func Save(cfg Config) error {
 		return err
 	}
 	return os.WriteFile(path, raw, 0o600)
-}
-
-// ResolveDownloadDir returns the configured download folder, defaulting to the
-// user's Downloads directory.
-func (c Config) ResolveDownloadDir() string {
-	if strings.TrimSpace(c.DownloadDir) != "" {
-		return c.DownloadDir
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
-	}
-	downloads := filepath.Join(home, "Downloads")
-	if info, err := os.Stat(downloads); err == nil && info.IsDir() {
-		return downloads
-	}
-	return home
 }
