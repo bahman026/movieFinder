@@ -1,0 +1,8 @@
+dist/
+*.exe
+
+# JetBrains project files: machine-local paths and per-user settings.
+.idea/
+
+# Machine-local TLS-interception CAs exported by export-proxy-ca.ps1.
+certs/*.crt
