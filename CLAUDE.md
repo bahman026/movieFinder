@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Windows desktop client (Go + [Fyne](https://fyne.io)) for browsing, searching and downloading from the `playstore` movie API. Ships as a single self-contained `.exe`.
+A Windows desktop client (Go + [Fyne](https://fyne.io)) for browsing and searching the `playstore` movie API, plus subtitle search/download via OpenSubtitles. Ships as a single self-contained `.exe`.
 
 ## Build and test
 
@@ -21,8 +21,19 @@ Tests and vet run in the build image, which already carries the CA and module ca
 ```powershell
 docker build --target build -t moviefinder-build .
 docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-build `
-    go test ./internal/api/... ./internal/config/...
+    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/...
 ```
+
+For iterating on `internal/ui` itself — which only compiles under the Windows cross-build, so vet/test can't touch it — mount a cache volume and build directly instead of going through the full `docker build` (which reruns dependency resolution and takes minutes):
+
+```powershell
+docker volume create moviefinder-gocache
+docker run --rm -v "${PWD}:/src" -v moviefinder-gocache:/root/.cache/go-build -w /src `
+    -e GOOS=windows -e GOARCH=amd64 -e CGO_ENABLED=1 -e CC=x86_64-w64-mingw32-gcc -e CXX=x86_64-w64-mingw32-g++ `
+    moviefinder-build go build ./...
+```
+
+This turns a UI-only edit-compile cycle from ~5 minutes into seconds. A stray unused import is a hard compile error in Go — this is the fast way to catch that before running the full export build.
 
 Add `-run TestName` for a single test. **Exclude `./internal/ui`** from Linux test runs — Fyne needs X11/GL headers that are not installed in the image; the UI package only compiles under the Windows cross-build.
 
@@ -35,14 +46,16 @@ These bit during initial setup and are already handled. Don't undo them:
 - **The Dockerfile uses `go get ./... && go mod tidy -e`, not `go mod tidy`.** Plain `tidy` also walks the test-only dependencies of every dependency, pulling a long tail of modules the binary never links against and turning any mirror hiccup into a failed build.
 - **Keep `.ps1` files ASCII-only.** Windows PowerShell 5.1 reads scripts as ANSI without a BOM; a UTF-8 em dash decodes into a smart quote that PowerShell treats as a string delimiter, breaking the parse in a place far from the real character.
 - `-H windowsgui` in the link flags suppresses the console window behind the GUI. Drop it temporarily if you need to see stdout while debugging.
+- **The committed `go.mod`/`go.sum` must be the full ones, not the minimal file with just the direct `fyne.io/fyne/v2` require line.** The Dockerfile runs `go get ./...` inside the image to fill in the ~30 indirect requirements; both files are exported back out (`export` stage `COPY`s them, `build.ps1` moves them to the repo root) so the project can be built without Docker resolving dependencies from scratch each time. If a build ever fails outside Docker with `go: updates to go.mod needed`, this is why — it means the exported file was reverted or never landed.
 
 ## Architecture
 
-Three layers, each unaware of the one above it:
+```
+cmd/moviefinder  -> internal/ui  -> internal/api            -> internal/config
+                               \-> internal/opensubtitles
+```
 
-```
-cmd/moviefinder  -> internal/ui  -> internal/api  -> internal/config
-```
+`internal/opensubtitles` is independent of `internal/api` — it only needs a title, IMDb id and year, which `internal/ui` extracts from an `api.Detail` before calling it.
 
 ### The API and its two quirks
 
@@ -61,7 +74,9 @@ Field names that lie, confirmed against live responses:
 - `DownloadLink.resolution` is a decorative `⇩` glyph on every row; the real quality is in `label` (`"720P زیرنویس*"`, `"4K X265 زیرنویس**"`). `Describe()` keeps `resolution` only when it contains a digit, so a sibling deployment that fills it properly still works.
 - `DownloadLink.file_size` is a bare number of **megabytes**, frequently `null`.
 
-**Download URLs are signed and expire.** They point at separate `dl*.downlaodhaa.net` hosts and carry `md5` + `expires` parameters, so they must not be cached or persisted — re-fetch the details instead. This is also why `Client.Download` takes the URL as given rather than routing it through the mirror list: those file hosts are not the API hosts and are not interchangeable with them.
+**Download URLs are signed and expire.** They point at separate `dl*.downlaodhaa.net` hosts and carry `md5` + `expires` parameters, so they must not be cached or persisted — re-fetch the details instead. The app only displays them (`ui.showLinks`); it deliberately does not fetch the movie files itself. This is a product decision, not a limitation — don't reintroduce a download path for `DownloadLink` without checking that's actually wanted.
+
+**Image URLs in detail responses point at a dead CDN.** `cdn.p1kp9726i2hf0yu21upnpio3bls6.cf` no longer resolves, while the identical `/playstore/uploads/...` path is served by the API hosts. `Client.Image` therefore retries a failed fetch against `ActiveHost()`. Listing endpoints return working URLs already, so this only bites on the detail pane.
 
 ### Host failover
 
@@ -83,8 +98,25 @@ Fyne is not thread-safe. Every widget mutation from a goroutine **must** be wrap
 
 `reload` and `loadDetail` each cancel their previous in-flight request (`cancelLoad`, `cancelDetail`) and drop the response if `ctx.Err() != nil`, so fast typing or fast row-clicking cannot let a stale response win a race.
 
+### The poster grid
+
+The listing is a `widget.GridWrap` of `posterCard`, which is a real widget (`ExtendBaseWidget` + `CreateRenderer`) precisely so the update callback can type-assert the item back rather than keeping a side table keyed by `CanvasObject`.
+
+**GridWrap recycles tiles.** `posterCard.want` records the URL the tile currently expects, and the async image callback drops its result if `want` has changed since. Removing that check makes fast scrolling paint posters onto the wrong titles — intermittently, so it will not show up in a quick manual test.
+
+`imageCache` keeps decoded posters in memory and clears wholesale past 400 entries; posters are cheap to refetch, so there is no LRU.
+
 ### Client details worth knowing
 
-- `Client.Download` deliberately uses its own untimed `http.Client` — the configured timeout applies to API calls, but would kill a large file transfer partway. Cancellation is via context instead. It reuses `c.http.Transport` so TLS settings stay consistent.
-- `Client.fetch` caps reads with `io.LimitReader` so a misdirected URL cannot exhaust memory.
-- `ui.safeFileName` strips characters Windows rejects and takes `filepath.Base`, so an API-supplied title cannot escape the download folder. `downloadFileName` sanitises the stem *before* reattaching the extension, so a long title cannot truncate the extension away. Keep both properties on any new save path.
+- `Client.fetch`/`Client.fetchImage` cap reads with `io.LimitReader` so a misdirected URL cannot exhaust memory.
+- `ui.safeSubtitleName` (in `subtitles.go`) strips characters Windows rejects and takes `filepath.Base`, so an API-supplied filename cannot break the save dialog's pre-filled name. Keep that on any new save path — it's the same shape of guard the movie side used to need before movie downloads were removed.
+
+### OpenSubtitles
+
+`internal/opensubtitles` needs a free API key — confirmed live against both OpenSubtitles' current REST API and the legacy XML-RPC one VLC traditionally used: neither works without one. The REST API answers `{"message":"You cannot consume this service"}` with no key; the XML-RPC path's old public test user-agent (`OSTestUserAgent`) now answers `415 Disabled user agent`. There is no way around this — don't try a different endpoint or a hardcoded UA to route around it.
+
+`Client.Search` tries the title's IMDb id first (`imdb_id` param, stripped of the `tt` prefix by `ui.imdbNumeric`) and only falls back to `query`+`year` if that comes back with zero results — the two lookups are indexed independently on OpenSubtitles' side, so one being empty doesn't mean the other will be.
+
+`currentBaseURL` is a package-level `var`, not a `const`, purely so tests can redirect it at an `httptest` server — there's no runtime reason to change it. `flexInt` exists because `feature_details.year` is documented as a JSON number but this API has been known to drift, and it can't be verified live without an account; it accepts either a number or a string rather than failing the whole decode.
+
+There is no login flow — downloads are anonymous and quota-limited per IP by OpenSubtitles (typically a handful/day). Add one only if a user actually hits that limit; it's not worth the added credential-storage surface otherwise.
