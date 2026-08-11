@@ -1,0 +1,7 @@
+Website = "https://adlas.at"
+
+[Details]
+Name = "MovieFinder"
+ID = "at.adlas.moviefinder"
+Version = "0.1.0"
+Build = 1
