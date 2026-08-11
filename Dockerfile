@@ -51,9 +51,18 @@ ENV CGO_ENABLED=1 \
     CXX=x86_64-w64-mingw32-g++
 
 # -H windowsgui suppresses the console window behind the GUI.
-RUN go build -trimpath -ldflags "-H windowsgui -s -w" -o /out/MovieFinder.exe ./cmd/moviefinder
+#
+# The cache mount keeps the compiled Fyne/GL objects between builds. Without it
+# every build recompiles the whole CGO dependency tree, which takes minutes.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags "-H windowsgui -s -w" -o /out/MovieFinder.exe ./cmd/moviefinder
 
 # Stage whose whole filesystem is written to the host by --output.
+#
+# go.mod comes back out alongside go.sum: `go get` above fills in the full
+# indirect requirement list, and without exporting it the repo keeps only the
+# minimal file, so nothing outside this image can build the project.
 FROM scratch AS export
 COPY --from=build /out/MovieFinder.exe /
+COPY --from=build /src/go.mod /
 COPY --from=build /src/go.sum /
