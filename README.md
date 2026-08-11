@@ -38,12 +38,31 @@ Both are already handled in the Dockerfile, but worth knowing if you build elsew
 
 ## What it does
 
-- **Browse** the main listing, one page at a time (`get_movies`)
-- **Search** films, series and TV channels in one list (`search`)
+- **Browse** the main listing as a poster grid, one page at a time (`get_movies`)
+- **Search** films, series and TV channels in one grid (`search`)
 - **Details** for the selected title — rating, genre, country, director, cast, description
-- **Download** any of the title's files, with a progress bar, to your Downloads folder
-- **Copy link** for use in another downloader
+- **Show links** for the title, each with its full URL and a copy button
+- **Find Subtitles** — search and download from OpenSubtitles for the selected title
 - **Automatic host failover** between mirrors
+
+The app does not download the movie files themselves; it surfaces the links for you to hand to whatever downloader you prefer. Subtitles are the one thing it does download directly, since they're small and the whole point is to save one next to the video.
+
+### Subtitles
+
+**Find Subtitles** requires your own free OpenSubtitles API key — register an account and create a "consumer" (API application) at <https://www.opensubtitles.com/en/consumers>, then paste the key into `Settings → OpenSubtitles key`. Without it the API refuses every request with "You cannot consume this service"; this was confirmed against the live service rather than assumed, and it holds for both OpenSubtitles' current REST API and the legacy XML-RPC one VLC traditionally used — the old public test user-agent that used to allow anonymous access has since been disabled.
+
+Searching prefers the title's IMDb id, which OpenSubtitles matches far more precisely than free text, and falls back to title + year only if that comes back empty. Results show the movie name, release filename (the thing you actually match against your video file), upload date, download count and rating, filtered to a language you pick — English by default. Downloading a subtitle opens the OS's native save dialog rather than a fixed folder, since the video it belongs with could be anywhere.
+
+Downloads made without logging in are quota-limited per IP by OpenSubtitles, typically a handful per day; there's no login flow here, since the anonymous quota is enough for occasional use.
+
+### Posters
+
+Each tile shows the poster with the IMDb rating badge bottom-left and the release year bottom-right, and the title underneath.
+
+Posters load lazily as tiles scroll into view and are cached in memory, so paging back is instant. Two details worth knowing:
+
+- The grid recycles tiles while scrolling, so each tile records which poster it is waiting for and discards a late-arriving image if it has since been reused for a different title. Without that, fast scrolling paints posters onto the wrong cards.
+- Detail responses return image URLs on a CDN host that no longer resolves, while the same path is served by the API host. A failed image fetch is therefore retried against the host that is currently answering.
 
 ## Host failover
 
@@ -84,21 +103,24 @@ Quirks the client works around:
 - **Errors arrive with HTTP 200**, as `{"status":"error","message":"…"}`. The status code alone never reveals a failure, so every response body is checked for that envelope.
 - **`search` is not paged** — it returns all matches at once — so the pager is disabled while a search is active.
 - **Some field names are misleading.** `writer` on a listing entry is the localized title. `resolution` on a download link is a decorative `⇩` glyph, with the real quality in `label`. `file_size` is a bare number of megabytes and is often `null`.
-- **Download URLs expire.** They point at separate `dl*.downlaodhaa.net` file hosts and are signed with `md5` + `expires`, so the app fetches them fresh with the title's details rather than storing them. If a download fails after the window has been open a long time, reselect the title to get a fresh link.
+- **Links expire.** They point at separate `dl*.downlaodhaa.net` file hosts and are signed with `md5` + `expires`, so the app fetches them fresh with the title's details rather than storing them. If a link has gone stale, reselect the title to get a fresh one.
 
-The `Downloads (n)` list in the detail pane comes straight from `download_links`; pick one in the dropdown and hit Download.
+The `Links (n)` list in the detail pane comes straight from `download_links`.
 
 ## Layout
 
 ```
-cmd/moviefinder/main.go     entry point
-internal/api/client.go      endpoints, host failover, download streaming
-internal/api/model.go       Movie / Detail types, error-envelope detection
-internal/api/client_test.go failover and decoding tests
-internal/config/config.go   settings load/save (%APPDATA%)
-internal/ui/app.go          window, table, detail pane, download picker
-internal/ui/settings.go     settings dialog and per-host connection test
-Dockerfile                  mingw cross-compile to a Windows .exe
-build.ps1                   one-command build wrapper
-export-proxy-ca.ps1         exports the local TLS-interception CA for the build
+cmd/moviefinder/main.go            entry point
+internal/api/client.go             endpoints, host failover, image fetch
+internal/api/model.go              Movie / Detail types, error-envelope detection
+internal/api/client_test.go        failover and decoding tests
+internal/config/config.go          settings load/save (%APPDATA%)
+internal/opensubtitles/client.go   OpenSubtitles search and download
+internal/ui/app.go                 window, poster grid, detail pane, links
+internal/ui/poster.go              poster grid tiles and image cache
+internal/ui/subtitles.go           subtitle search dialog and download
+internal/ui/settings.go            settings dialog and per-host connection test
+Dockerfile                         mingw cross-compile to a Windows .exe
+build.ps1                          one-command build wrapper
+export-proxy-ca.ps1                exports the local TLS-interception CA for the build
 ```
