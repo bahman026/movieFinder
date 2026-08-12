@@ -150,6 +150,7 @@ func (c *Client) Details(ctx context.Context, kind, id string) (Detail, error) {
 	if err := json.Unmarshal(body, &detail); err != nil {
 		return Detail{}, fmt.Errorf("decode details: %w", err)
 	}
+	detail.Seasons = seasonsFromRaw(detail.RawSeasons)
 	return detail, nil
 }
 

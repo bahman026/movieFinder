@@ -55,6 +55,53 @@ func TestLiveSearchAndDetails(t *testing.T) {
 	t.Logf("resolved download URL: %s", url)
 }
 
+func TestLiveSeriesHasSeasons(t *testing.T) {
+	c := liveClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	results, err := c.Search(ctx, "dexter", 1)
+	if err != nil || len(results) == 0 {
+		t.Fatalf("search: %v (n=%d)", err, len(results))
+	}
+	// Find a result that is a series (has seasons in its details).
+	for _, r := range results {
+		d, err := c.Details(ctx, r.ID)
+		if err != nil {
+			continue
+		}
+		if len(d.Seasons) > 0 {
+			t.Logf("series %q: %d season(s); first %q has %d episodes; ep1 link=%s",
+				d.Title, len(d.Seasons), d.Seasons[0].Name, len(d.Seasons[0].Episodes),
+				d.Seasons[0].Episodes[0].Link)
+			return
+		}
+	}
+	t.Fatal("no series with seasons found among dexter results")
+}
+
+func TestLiveCastSearch(t *testing.T) {
+	c := liveClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	casts, err := c.SearchCast(ctx, "Leonardo DiCaprio")
+	if err != nil || len(casts) == 0 {
+		t.Fatalf("SearchCast: %v (n=%d)", err, len(casts))
+	}
+	t.Logf("cast match: %q (id=%s, role=%s)", casts[0].Name, casts[0].ID, casts[0].Role)
+
+	movies, bio, err := c.CastMovies(ctx, casts[0].ID, 1)
+	if err != nil {
+		t.Fatalf("CastMovies: %v", err)
+	}
+	if len(movies) == 0 {
+		t.Fatal("no movies for the cast")
+	}
+	t.Logf("%d movie(s); e.g. %q (%s); bio %d chars",
+		len(movies), movies[0].Title, movies[0].Year, len(bio))
+}
+
 func TestLiveHome(t *testing.T) {
 	c := liveClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

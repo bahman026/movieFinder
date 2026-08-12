@@ -151,6 +151,61 @@ func (c *Client) Search(ctx context.Context, query string, page int) ([]Item, er
 	return resp.All, nil
 }
 
+// SearchCast finds people (actors/directors) matching a name. The first result
+// is usually the best match.
+func (c *Client) SearchCast(ctx context.Context, query string) ([]Cast, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("cast name is empty")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureSession(ctx); err != nil {
+		return nil, err
+	}
+
+	var resp searchCastResponse
+	if err := c.roundtrip(ctx, "search_cast&pageno=1", url.Values{"q": {query}, "cast_type": {"cast"}}, &resp); err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(resp.StateAll, "F") {
+		return nil, fmt.Errorf("%s", firstNonEmpty(resp.Msg, "the server rejected the request"))
+	}
+
+	casts := make([]Cast, 0, len(resp.MovieList))
+	for _, p := range resp.MovieList {
+		casts = append(casts, Cast{
+			ID:   strconv.Itoa(asInt(p.ID)),
+			Name: p.Name,
+			Role: p.ActionUser,
+			Pic:  p.PicURL,
+		})
+	}
+	return casts, nil
+}
+
+// CastMovies returns one page of a person's movies, plus their bio.
+func (c *Client) CastMovies(ctx context.Context, castID string, page int) ([]Item, string, error) {
+	if page < 1 {
+		page = 1
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureSession(ctx); err != nil {
+		return nil, "", err
+	}
+
+	var resp castMoviesResponse
+	if err := c.roundtrip(ctx, "show_movie_cast&pageno="+strconv.Itoa(page),
+		url.Values{"cast_id": {castID}, "cast_type": {"cast"}}, &resp); err != nil {
+		return nil, "", err
+	}
+	if strings.EqualFold(resp.StateAll, "F") {
+		return nil, "", fmt.Errorf("%s", firstNonEmpty(resp.Msg, "the server rejected the request"))
+	}
+	return resp.MovieList, resp.Bio, nil
+}
+
 // Details fetches one title, including its download links.
 func (c *Client) Details(ctx context.Context, id string) (Detail, error) {
 	c.mu.Lock()
@@ -171,7 +226,7 @@ func (c *Client) Details(ctx context.Context, id string) (Detail, error) {
 	}
 
 	d := resp.Detiles[0]
-	return Detail{
+	detail := Detail{
 		ID:            id,
 		Title:         d.Title,
 		OriginalTitle: originalTitle(d.Description),
@@ -182,8 +237,24 @@ func (c *Client) Details(ctx context.Context, id string) (Detail, error) {
 		ThumbnailURL:  d.ThumbnailURL,
 		TrailerURL:    d.TrailerURL,
 		IsMovie:       d.IsMovie == "1",
-		DownloadLinks: d.DownloadLink,
-	}, nil
+	}
+
+	// download_link is a flat list for films and a season/episode tree for
+	// series; decode whichever this is.
+	if detail.IsMovie {
+		_ = json.Unmarshal(d.DownloadLink, &detail.DownloadLinks)
+	} else {
+		var seasons []seriesSeason
+		if err := json.Unmarshal(d.DownloadLink, &seasons); err == nil {
+			for _, s := range seasons {
+				if len(s.Links) == 0 {
+					continue
+				}
+				detail.Seasons = append(detail.Seasons, Season{Name: s.SessionTitle, Episodes: s.Links})
+			}
+		}
+	}
+	return detail, nil
 }
 
 // ResolveLinks resolves every link's play.php redirect to its real file URL,
@@ -341,9 +412,11 @@ type nonceCarrier interface {
 	nonce() (q1, q2 int, ok bool)
 }
 
-func (r *vitrinResponse) nonce() (int, int, bool)  { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
-func (r *searchResponse) nonce() (int, int, bool)  { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
-func (r *detialsResponse) nonce() (int, int, bool) { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
+func (r *vitrinResponse) nonce() (int, int, bool)      { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
+func (r *searchResponse) nonce() (int, int, bool)      { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
+func (r *detialsResponse) nonce() (int, int, bool)     { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
+func (r *searchCastResponse) nonce() (int, int, bool)  { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
+func (r *castMoviesResponse) nonce() (int, int, bool)  { return asInt(r.Q1), asInt(r.Q2), r.Q1 != nil }
 
 // asInt reads a q1/q2 value that the API sends as either a JSON number or a
 // JSON string.
