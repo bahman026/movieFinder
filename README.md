@@ -18,25 +18,21 @@ The result is a single self-contained `dist\MovieFinder.exe` — no runtime, no 
 
 The first build downloads the Go image and the mingw cross-compiler (a few minutes). Later builds reuse the layer cache. The build also emits `dist\go.sum`; `build.ps1` moves it into the repo root so dependency versions stay pinned from then on.
 
-### Build secrets (`.env`)
+See **[BUILD.md](BUILD.md)** for step-by-step build instructions (Windows and Linux), including prerequisites.
 
-The built-in OpenSubtitles key is **not** stored in source. Copy `.env.example` to `.env` and fill it in:
+### Built-in subtitle key
 
-```
-OPENSUBTITLES_API_KEY=your_key_here
-```
-
-`build.ps1` reads `.env` and injects each value into the binary at link time (`-ldflags -X`). `.env` is gitignored, so the key lives only in that local file and the compiled `.exe` (also gitignored) — never in the repository. Building without a `.env` just produces a binary with no built-in key, and users then supply their own under Settings.
+The built-in OpenSubtitles key is **not** stored in source. Copy `internal/opensubtitles/key.go.example` to `internal/opensubtitles/key.go` and put the key inside. `key.go` is gitignored, so the key is compiled into the binary but never committed. Skipping it is fine — the app then has no built-in key and users provide their own in Settings.
 
 ### Tests
 
 ```powershell
-docker build --target build -t moviefinder-build .
-docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-build `
-    go test ./internal/api/... ./internal/config/...
+docker build --target base -t moviefinder-base .
+docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-base `
+    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/delfan/... ./internal/player/... ./internal/stream/...
 ```
 
-`./internal/ui` is excluded — Fyne needs X11/GL headers that the build image does not carry; that package only compiles under the Windows cross-build.
+`./internal/ui` is left out of the unit run because its tests would need a display; it is compiled by the full Windows or Linux build.
 
 ### Two things this machine needed
 
@@ -52,9 +48,28 @@ Both are already handled in the Dockerfile, but worth knowing if you build elsew
 - **Browse** the main listing as a poster grid
 - **Search** by title
 - **Details** for the selected title — rating, genre, description, and its download links
-- **Show links** for the title, each with its full URL and a copy button
+- **Show links** for the title, each with its full URL, a **Play** button and a copy button
+- **Play** — stream a quality in an external player (PotPlayer / mpv / VLC / MPC-HC), optionally with a subtitle applied
 - **Find Subtitles** — search and download from OpenSubtitles for the selected title, on either source
 - **Automatic host failover** between mirrors (MovieFinder source)
+
+### Playing with subtitles
+
+**Play** on a link opens a dialog: pick a language, choose one of the OpenSubtitles results to play *with*, or **Play without subtitle**. The chosen subtitle is downloaded and handed to the player so it loads automatically — the same idea as VLC's "add subtitle", done for you.
+
+The app does not decode video itself (its GUI toolkit has no media support); it drives a real player, which handles any codec. It auto-detects PotPlayer, mpv, VLC or MPC-HC, using the right subtitle flag for each. If yours lives somewhere unusual, set its path under `Settings → Video player`.
+
+### Download while watching (one connection)
+
+The Play dialog's **Download while playing (save a copy)** option — on by default — watches and downloads at the same time, over a single connection. You pick where to save; the app then opens **one** connection to the file host, writes it to that file, and serves the player from `localhost` as the file fills. When it finishes you have the complete movie saved, having downloaded it only once.
+
+- Only one upstream connection is ever opened — the player reads from `localhost`, not the internet.
+- Seeking forward waits for the download to reach that point rather than opening a second connection. Most files start playing immediately; a few `.mkv`s whose seek index sits at the end may buffer more before they begin.
+- Closing the player doesn't stop the download — it keeps going so you still get the full file. The status bar shows progress and the final save path.
+- While a download runs, **Pause / Resume** and **Cancel** buttons appear next to the status bar. Pause holds the single connection open (no reconnect); Cancel stops it and leaves the partial file on disk.
+- Untick the box to stream straight from the source without saving a copy.
+
+When you play *with* a subtitle and are saving a copy, the subtitle is written next to the movie with the **same name** (`Movie.mkv` → `Movie.srt`), so when the download finishes you have a matching pair that any player auto-associates.
 
 ### The Delfan source
 
@@ -134,6 +149,8 @@ internal/api/client_test.go        failover and decoding tests
 internal/config/config.go          settings load/save (%APPDATA%)
 internal/delfan/client.go          Delfan signed API: login, rolling nonce, search, details
 internal/opensubtitles/client.go   OpenSubtitles search and download
+internal/player/player.go          external player detection and launch
+internal/stream/server.go          download-while-playing tee (one connection)
 internal/ui/app.go                 window, poster grid, detail pane, links
 internal/ui/poster.go              poster grid tiles and image cache
 internal/ui/subtitles.go           subtitle search dialog and download

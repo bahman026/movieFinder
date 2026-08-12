@@ -1,21 +1,24 @@
-# Cross-compiles the Fyne GUI to a standalone Windows .exe.
+# Builds the Fyne GUI for Windows (.exe) or Linux, all inside Docker so nothing
+# is installed on the host.
 #
-# Fyne needs CGO, so the build stage pulls in the mingw-w64 toolchain and
-# points the Go build at it. Nothing is installed on the host.
+#   Windows:  docker build --target export       --output type=local,dest=dist .   -> dist/MovieFinder.exe
+#   Linux:    docker build --target export-linux  --output type=local,dest=dist .   -> dist/MovieFinder
 #
-#   docker build --target export --output type=local,dest=dist .
-#   -> dist/MovieFinder.exe
-FROM golang:1.24-bookworm AS build
+# Fyne needs CGO. The base stage carries both the mingw-w64 cross toolchain (for
+# Windows) and the Linux OpenGL/X11 dev libraries (for Linux).
+FROM golang:1.24-bookworm AS base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc-mingw-w64-x86-64 \
         g++-mingw-w64-x86-64 \
+        libgl1-mesa-dev \
+        xorg-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Any root CA dropped in certs/ becomes trusted inside the build. Needed when a
-# debugging proxy or corporate appliance re-signs HTTPS — Windows trusts that CA,
-# a fresh container does not. See certs/README.md and export-proxy-ca.ps1.
+# debugging proxy or corporate appliance re-signs HTTPS — the host trusts that
+# CA, a fresh container does not. See certs/README.md and export-proxy-ca.ps1.
 COPY certs/ /usr/local/share/ca-certificates/host/
 RUN update-ca-certificates
 
@@ -44,25 +47,34 @@ COPY . .
 # `-e` on the tidy pass keeps those irrelevant modules from being fatal.
 RUN go get ./... && go mod tidy -e
 
-ENV CGO_ENABLED=1 \
-    GOOS=windows \
-    GOARCH=amd64 \
-    CC=x86_64-w64-mingw32-gcc \
-    CXX=x86_64-w64-mingw32-g++
-
-# -H windowsgui suppresses the console window behind the GUI.
-#
-# The cache mount keeps the compiled Fyne/GL objects between builds. Without it
-# every build recompiles the whole CGO dependency tree, which takes minutes.
+# ---------------------------------------------------------------------------
+# Windows target
+# ---------------------------------------------------------------------------
+# -H windowsgui suppresses the console window behind the GUI. The cache mount
+# keeps the compiled Fyne/GL objects between builds, so a rebuild takes seconds
+# instead of recompiling the whole CGO dependency tree.
+FROM base AS build-windows
 RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+    CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
     go build -trimpath -ldflags "-H windowsgui -s -w" -o /out/MovieFinder.exe ./cmd/moviefinder
 
-# Stage whose whole filesystem is written to the host by --output.
-#
-# go.mod comes back out alongside go.sum: `go get` above fills in the full
-# indirect requirement list, and without exporting it the repo keeps only the
-# minimal file, so nothing outside this image can build the project.
+# Stage whose whole filesystem is written to the host by --output. go.mod comes
+# back out alongside go.sum: `go get` above fills in the full indirect
+# requirement list, and without exporting it the repo keeps only the minimal
+# file, so nothing outside this image can build the project.
 FROM scratch AS export
-COPY --from=build /out/MovieFinder.exe /
-COPY --from=build /src/go.mod /
-COPY --from=build /src/go.sum /
+COPY --from=build-windows /out/MovieFinder.exe /
+COPY --from=build-windows /src/go.mod /
+COPY --from=build-windows /src/go.sum /
+
+# ---------------------------------------------------------------------------
+# Linux target
+# ---------------------------------------------------------------------------
+FROM base AS build-linux
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags "-s -w" -o /out/MovieFinder ./cmd/moviefinder
+
+FROM scratch AS export-linux
+COPY --from=build-linux /out/MovieFinder /
