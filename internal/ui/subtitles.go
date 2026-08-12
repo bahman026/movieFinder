@@ -72,9 +72,9 @@ func imdbNumeric(id string) string {
 // currently loaded detail, defaulting to English.
 func (u *UI) showSubtitles() {
 	u.mu.RLock()
-	title := u.detail.Title
-	year := u.detail.Year()
-	imdbID := imdbNumeric(u.detail.IMDBID)
+	title := u.subTitle
+	year := u.subYear
+	imdbID := u.subIMDB
 	u.mu.RUnlock()
 
 	if strings.TrimSpace(title) == "" {

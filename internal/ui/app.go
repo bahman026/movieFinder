@@ -17,7 +17,14 @@ import (
 
 	"github.com/adlas/moviefinder/internal/api"
 	"github.com/adlas/moviefinder/internal/config"
+	"github.com/adlas/moviefinder/internal/delfan"
 	"github.com/adlas/moviefinder/internal/opensubtitles"
+)
+
+// Sources the user can switch between.
+const (
+	sourceMovieFinder = "MovieFinder"
+	sourceDelfan      = "Delfan"
 )
 
 const appID = "at.adlas.moviefinder"
@@ -29,18 +36,26 @@ type UI struct {
 
 	cfg       config.Config
 	client    *api.Client
+	delfan    *delfan.Client
 	subtitles *opensubtitles.Client
 	images    *imageCache
 
 	// mu guards everything the loader goroutines write and the widget
 	// callbacks read on the UI thread.
 	mu       sync.RWMutex
+	source   string
 	movies   []api.Movie
 	detail   api.Detail
 	links    []api.DownloadLink
 	page     int
 	query    string
 	selected int
+	// subtitle-search metadata for the current detail, kept separate so the
+	// Delfan source can search OpenSubtitles by its English original title
+	// rather than the Persian display title.
+	subTitle string
+	subIMDB  string
+	subYear  string
 
 	// cancelLoad stops the in-flight listing request when a new one starts;
 	// cancelDetail does the same for the detail pane.
@@ -71,8 +86,10 @@ func Run() {
 		window:    w,
 		cfg:       cfg,
 		client:    api.New(cfg),
-		subtitles: opensubtitles.New(cfg.OpenSubtitlesAPIKey),
+		delfan:    delfan.New(cfg.DelfanLoginHost, cfg.DelfanAPIHost),
+		subtitles: opensubtitles.New(opensubtitles.ResolveKey(cfg.OpenSubtitlesAPIKey)),
 		images:    newImageCache(),
+		source:    sourceMovieFinder,
 		page:      1,
 		selected:  -1,
 	}
@@ -106,7 +123,18 @@ func (u *UI) build() fyne.CanvasObject {
 		u.showSettings()
 	})
 
-	toolbar := container.NewBorder(nil, nil, nil,
+	sourceSelect := widget.NewSelect([]string{sourceMovieFinder, sourceDelfan}, func(name string) {
+		u.mu.Lock()
+		u.source = name
+		u.query = ""
+		u.mu.Unlock()
+		u.search.SetText("")
+		u.reload(1)
+	})
+	sourceSelect.SetSelected(sourceMovieFinder)
+
+	toolbar := container.NewBorder(nil, nil,
+		sourceSelect,
 		container.NewHBox(searchButton, clearButton, refreshButton, settingsButton),
 		u.search,
 	)
@@ -229,32 +257,31 @@ func (u *UI) reload(page int) {
 
 	u.mu.RLock()
 	query := u.query
+	source := u.source
 	u.mu.RUnlock()
 
 	searching := query != ""
+	// Which combinations page: MovieFinder browse and Delfan search are paged;
+	// MovieFinder search (returns everything at once) and Delfan browse (a
+	// single home-page fetch) are not.
+	paged := (source == sourceMovieFinder && !searching) || (source == sourceDelfan && searching)
+	if !paged {
+		page = 1
+	}
 	if searching {
-		page = 1 // the search endpoint is not paged
 		u.setStatus("Searching for " + query + "…")
 	} else {
-		u.setStatus(fmt.Sprintf("Loading page %d…", page))
+		u.setStatus("Loading…")
 	}
 
 	go func() {
-		var (
-			movies []api.Movie
-			err    error
-		)
-		if searching {
-			movies, err = u.client.Search(ctx, query)
-		} else {
-			movies, err = u.client.Movies(ctx, page)
-		}
+		movies, host, err := u.fetch(ctx, source, query, searching, page)
 		if ctx.Err() != nil {
 			return // superseded by a newer request
 		}
 
 		fyne.Do(func() {
-			u.hostLabel.SetText("Server: " + u.client.ActiveHost())
+			u.hostLabel.SetText("Server: " + host)
 			if err != nil {
 				u.setStatus("Failed: " + firstLine(err.Error()))
 				dialog.ShowError(err, u.window)
@@ -273,37 +300,64 @@ func (u *UI) reload(page int) {
 			u.clearDetail("_Select a title to see its links._")
 
 			u.pageLabel.SetText(fmt.Sprintf("Page %d", page))
-			switch {
-			case searching:
-				// The search endpoint returns everything at once.
-				u.prevButton.Disable()
-				u.nextButton.Disable()
-			default:
+			if paged {
 				if page > 1 {
 					u.prevButton.Enable()
 				} else {
 					u.prevButton.Disable()
 				}
-				// An empty page means we have run past the end.
 				if len(movies) == 0 {
-					u.nextButton.Disable()
+					u.nextButton.Disable() // ran past the end
 				} else {
 					u.nextButton.Enable()
 				}
+			} else {
+				u.prevButton.Disable()
+				u.nextButton.Disable()
 			}
 
 			switch {
 			case len(movies) == 0 && searching:
 				u.setStatus("Nothing found for " + query + ".")
 			case len(movies) == 0:
-				u.setStatus("No titles on this page.")
+				u.setStatus("No titles to show.")
 			case searching:
 				u.setStatus(fmt.Sprintf("%d result(s) for %s.", len(movies), query))
-			default:
+			case paged:
 				u.setStatus(fmt.Sprintf("%d title(s) on page %d.", len(movies), page))
+			default:
+				u.setStatus(fmt.Sprintf("%d title(s).", len(movies)))
 			}
 		})
 	}()
+}
+
+// fetch pulls a page of titles from the active source and returns the human
+// label for the server that answered.
+func (u *UI) fetch(ctx context.Context, source, query string, searching bool, page int) ([]api.Movie, string, error) {
+	if source == sourceDelfan {
+		var (
+			items []delfan.Item
+			err   error
+		)
+		if searching {
+			items, err = u.delfan.Search(ctx, query, page)
+		} else {
+			items, err = u.delfan.Home(ctx)
+		}
+		return delfanItemsToMovies(items), "Delfan", err
+	}
+
+	var (
+		movies []api.Movie
+		err    error
+	)
+	if searching {
+		movies, err = u.client.Search(ctx, query)
+	} else {
+		movies, err = u.client.Movies(ctx, page)
+	}
+	return movies, u.client.ActiveHost(), err
 }
 
 // loadDetail fetches the full record for a card and fills the detail pane.
@@ -319,10 +373,14 @@ func (u *UI) loadDetail(index int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	u.cancelDetail = cancel
 
+	u.mu.RLock()
+	source := u.source
+	u.mu.RUnlock()
+
 	u.clearDetail("## " + movie.Title + "\n\n_Loading…_")
 
 	go func() {
-		detail, err := u.client.Details(ctx, movie.Kind(), movie.ID)
+		detail, sub, err := u.fetchDetail(ctx, source, movie)
 		if ctx.Err() != nil {
 			return
 		}
@@ -336,12 +394,44 @@ func (u *UI) loadDetail(index int) {
 			u.mu.Lock()
 			u.detail = detail
 			u.links = detail.DownloadLinks
+			u.subTitle, u.subIMDB, u.subYear = sub.title, sub.imdb, sub.year
 			u.mu.Unlock()
 
 			u.info.ParseMarkdown(renderDetail(detail))
 			u.showLinks(detail.DownloadLinks)
 		})
 	}()
+}
+
+// subMeta is what the subtitle search needs, kept separate from the display
+// detail so Delfan can search by English title while showing the Persian one.
+type subMeta struct{ title, imdb, year string }
+
+func (u *UI) fetchDetail(ctx context.Context, source string, movie api.Movie) (api.Detail, subMeta, error) {
+	if source == sourceDelfan {
+		d, err := u.delfan.Details(ctx, movie.ID)
+		if err != nil {
+			return api.Detail{}, subMeta{}, err
+		}
+		// Resolve each play.php link to its real stream/download URL. Bounded
+		// so a slow file host cannot hang the detail pane indefinitely.
+		rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		resolved := u.delfan.ResolveLinks(rctx, d.DownloadLinks)
+		cancel()
+
+		detail := delfanDetailToDetail(d, resolved)
+		title := d.OriginalTitle
+		if title == "" {
+			title = d.Title
+		}
+		return detail, subMeta{title: title, imdb: "", year: d.Year}, nil
+	}
+
+	detail, err := u.client.Details(ctx, movie.Kind(), movie.ID)
+	if err != nil {
+		return api.Detail{}, subMeta{}, err
+	}
+	return detail, subMeta{title: detail.Title, imdb: imdbNumeric(detail.IMDBID), year: detail.Year()}, nil
 }
 
 // showLinks lists every link with its URL and a copy button.
@@ -414,6 +504,7 @@ func (u *UI) clearDetail(markdown string) {
 	u.mu.Lock()
 	u.links = nil
 	u.detail = api.Detail{}
+	u.subTitle, u.subIMDB, u.subYear = "", "", ""
 	u.mu.Unlock()
 	u.linkBox.RemoveAll()
 	u.linkBox.Refresh()
