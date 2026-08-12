@@ -19,23 +19,25 @@ Equivalent to `docker build --target export --output "type=local,dest=dist" .`, 
 Tests and vet run in the build image, which already carries the CA and module cache:
 
 ```powershell
-docker build --target build -t moviefinder-build .
-docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-build `
-    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/...
+docker build --target base -t moviefinder-base .
+docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-base `
+    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/delfan/... ./internal/player/... ./internal/stream/...
 ```
 
-For iterating on `internal/ui` itself — which only compiles under the Windows cross-build, so vet/test can't touch it — mount a cache volume and build directly instead of going through the full `docker build` (which reruns dependency resolution and takes minutes):
+The Dockerfile is a shared `base` stage plus `build-windows` / `build-linux` targets (with `export` / `export-linux` scratch stages). `base` now carries the Linux GL/X11 dev libs too, so it can build both OSes. See BUILD.md for the user-facing build steps.
+
+For iterating on `internal/ui` (its tests want a display, so vet/compile is the fast check), mount a cache volume and build directly instead of the full `docker build`:
 
 ```powershell
 docker volume create moviefinder-gocache
 docker run --rm -v "${PWD}:/src" -v moviefinder-gocache:/root/.cache/go-build -w /src `
     -e GOOS=windows -e GOARCH=amd64 -e CGO_ENABLED=1 -e CC=x86_64-w64-mingw32-gcc -e CXX=x86_64-w64-mingw32-g++ `
-    moviefinder-build go build ./...
+    moviefinder-base go build ./...
 ```
 
-This turns a UI-only edit-compile cycle from ~5 minutes into seconds. A stray unused import is a hard compile error in Go — this is the fast way to catch that before running the full export build.
+This turns a UI-only edit-compile cycle from ~5 minutes into seconds. A stray unused import is a hard compile error in Go — this is the fast way to catch that before running the full export build. (The `moviefinder-build` image from earlier still works if you already have it; new checkouts should tag `base`.)
 
-Add `-run TestName` for a single test. **Exclude `./internal/ui`** from Linux test runs — Fyne needs X11/GL headers that are not installed in the image; the UI package only compiles under the Windows cross-build.
+Add `-run TestName` for a single test. **Exclude `./internal/ui`** from headless test runs — it compiles now that `base` carries the GL/X11 libs, but its tests would need a display. Compile it via the full `build-windows`/`build-linux` targets or the fast cache build above.
 
 ## Environment constraints
 
@@ -57,7 +59,17 @@ cmd/moviefinder  -> internal/ui  -> internal/api            -> internal/config
                                \-> internal/opensubtitles
 ```
 
-`internal/opensubtitles` and `internal/delfan` are independent of `internal/api`. The UI switches between two content sources (`sourceMovieFinder`, `sourceDelfan`); `delfan_adapt.go` converts Delfan's types onto `api.Movie`/`api.Detail` so the poster grid and detail pane render both without knowing which source they came from. `fetch`/`fetchDetail` in `app.go` are the two branch points.
+`internal/opensubtitles`, `internal/delfan` and `internal/player` are independent of `internal/api`. The UI switches between two content sources (`sourceMovieFinder`, `sourceDelfan`); `delfan_adapt.go` converts Delfan's types onto `api.Movie`/`api.Detail` so the poster grid and detail pane render both without knowing which source they came from. `fetch`/`fetchDetail` in `app.go` are the two branch points.
+
+### Playback
+
+There is no in-app video decoder — Fyne has no media support, so `internal/player` drives an external player instead (the same delegation the Delfan app itself uses). `player.Detect` probes a configured path, then PATH, then known install locations for PotPlayer / mpv / VLC / MPC-HC, and `Play` appends the subtitle with that player's own flag (`/sub=`, `--sub-file=`, `/sub`). The Play flow (`ui/playback.go`) resolves nothing extra — link URLs are already playable (Delfan links are resolved at detail-load, playstore links are direct) — it just downloads the chosen OpenSubtitles `.srt` to a temp file and hands both to the player.
+
+### Download while playing (`internal/stream`)
+
+The "one connection" constraint drives the whole design. `stream.Server` opens exactly ONE upstream GET, writes the body sequentially into the save file, and runs a `127.0.0.1` HTTP server that serves the player from that growing file. Only the upstream download touches the internet; the player reads from localhost, so a player that opens several connections still costs one internet connection. `TestStreamSavesFullFileFromOneConnection` asserts the upstream is hit exactly once.
+
+Range requests are served from the save file, and a range that seeks past the current download point **blocks on the sync.Cond until those bytes arrive** rather than opening a second upstream connection (`TestRangeAheadOfDownloadBlocksThenServes`). The consequence, worth remembering: an `.mkv` whose seek index (Cues) is at the end makes a player request the tail first, which stalls playback until the download reaches it — inherent to single-connection sequential download, not a bug. The download keeps running after the player disconnects (so the saved file completes); `Stop` cancels it and is called when a new playback replaces the old one. Reader visibility relies on `os.File.Write` being visible to a separate `os.Open`+`ReadAt` handle without `fsync` — true within one process on Windows, so no expensive per-chunk sync.
 
 ### The API and its two quirks
 
