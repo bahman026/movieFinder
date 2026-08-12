@@ -1,6 +1,7 @@
 package delfan
 
 import (
+	"encoding/json"
 	"strings"
 )
 
@@ -18,8 +19,10 @@ type Item struct {
 // 302-redirects to the real, signed and expiring file URL; ResolveDownloadURL
 // follows that redirect.
 type DownloadLink struct {
-	ID    int    `json:"id"`
-	Name  string `json:"name"`       // e.g. "کیفیت 720 زیرنویس" (720 with subtitle)
+	// ID is a JSON number for film qualities but a JSON string for episodes, so
+	// it is decoded loosely.
+	ID    any    `json:"id"`
+	Name  string `json:"name"`       // e.g. "کیفیت 720 زیرنویس" (720 with subtitle) or "قسمت 1"
 	Link  string `json:"link"`       // play.php resolver
 	Size  string `json:"video_size"` // e.g. "809 مگابایت"
 	Subno string `json:"subtitle"`
@@ -40,6 +43,13 @@ func (d DownloadLink) Describe() string {
 	return strings.Join(parts, " · ")
 }
 
+// Season groups a series' episodes (one entry per language/quality cut, e.g.
+// "فصل 1 زیرنویس" = season 1, subtitled).
+type Season struct {
+	Name     string
+	Episodes []DownloadLink
+}
+
 // Detail is one title's full record from the detials endpoint.
 type Detail struct {
 	ID            string
@@ -52,7 +62,16 @@ type Detail struct {
 	ThumbnailURL  string
 	TrailerURL    string
 	IsMovie       bool
-	DownloadLinks []DownloadLink
+	DownloadLinks []DownloadLink // films only
+	Seasons       []Season       // series only
+}
+
+// Cast is a person (actor/director) returned by a cast search.
+type Cast struct {
+	ID   string
+	Name string
+	Role string // action_user, e.g. "بازیگر" (actor)
+	Pic  string
 }
 
 // Home is the vitrin (home page) payload, trimmed to the rows worth showing.
@@ -99,15 +118,46 @@ type detialsResponse struct {
 	Q1       any    `json:"q1"`
 	Q2       any    `json:"q2"`
 	Detiles  []struct {
-		ID           any            `json:"id"`
-		Title        string         `json:"title"`
-		IMDBRating   string         `json:"imdb_rating"`
-		Description  string         `json:"description"`
-		Year         string         `json:"year"`
-		PosterURL    string         `json:"poster_url"`
-		ThumbnailURL string         `json:"thumbnail_url"`
-		TrailerURL   string         `json:"trailer_url"`
-		IsMovie      string         `json:"is_movie"`
-		DownloadLink []DownloadLink `json:"download_link"`
+		ID           any    `json:"id"`
+		Title        string `json:"title"`
+		IMDBRating   string `json:"imdb_rating"`
+		Description  string `json:"description"`
+		Year         string `json:"year"`
+		PosterURL    string `json:"poster_url"`
+		ThumbnailURL string `json:"thumbnail_url"`
+		TrailerURL   string `json:"trailer_url"`
+		IsMovie      string `json:"is_movie"`
+		// download_link is polymorphic: for a film it is a flat array of
+		// DownloadLink; for a series it is an array of {session_title, links}.
+		// Decoded conditionally in Client.Details.
+		DownloadLink json.RawMessage `json:"download_link"`
 	} `json:"detiles"`
+}
+
+// seriesSeason is the series shape of a download_link entry.
+type seriesSeason struct {
+	SessionTitle string         `json:"session_title"`
+	Links        []DownloadLink `json:"links"`
+}
+
+type searchCastResponse struct {
+	StateAll  string `json:"state_all"`
+	Msg       string `json:"msg"`
+	Q1        any    `json:"q1"`
+	Q2        any    `json:"q2"`
+	MovieList []struct {
+		ID         any    `json:"id"`
+		Name       string `json:"name"`
+		ActionUser string `json:"action_user"`
+		PicURL     string `json:"pic_url"`
+	} `json:"movie_list"`
+}
+
+type castMoviesResponse struct {
+	StateAll  string `json:"state_all"`
+	Msg       string `json:"msg"`
+	Q1        any    `json:"q1"`
+	Q2        any    `json:"q2"`
+	Bio       string `json:"bio"`
+	MovieList []Item `json:"movie_list"`
 }

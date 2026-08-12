@@ -95,6 +95,41 @@ func TestErrorEnvelopeIsAnError(t *testing.T) {
 	}
 }
 
+// A series' get_single_details carries a season/episode tree that must decode
+// into Detail.Seasons with each episode's direct file_url.
+func TestSeriesSeasonsDecode(t *testing.T) {
+	body := `{"videos_id":"1","title":"Dexter","is_tvseries":"1","season":[
+	  {"seasons_name":"1 480p sub","episodes":[
+	     {"episodes_id":"e1","episodes_name":"Ep 1","file_url":"http://x/1.mp4"},
+	     {"episodes_id":"e2","episodes_name":"Ep 2","file_url":"http://x/2.mp4"}]},
+	  {"seasons_name":"1 720p dub","episodes":[
+	     {"episodes_id":"e3","episodes_name":"Ep 1 dub","file_url":"http://x/3.mkv"}]}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("type"); got != "tvseries" {
+			t.Errorf("type = %q, want tvseries", got)
+		}
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	detail, err := New(testConfig(server.URL)).Details(context.Background(), "tvseries", "1")
+	if err != nil {
+		t.Fatalf("Details: %v", err)
+	}
+	if !detail.IsSeries() {
+		t.Fatal("IsSeries() = false for a title with seasons")
+	}
+	if len(detail.Seasons) != 2 {
+		t.Fatalf("got %d seasons, want 2", len(detail.Seasons))
+	}
+	if len(detail.Seasons[0].Episodes) != 2 {
+		t.Fatalf("season 1 has %d episodes, want 2", len(detail.Seasons[0].Episodes))
+	}
+	if detail.Seasons[0].Episodes[0].URL != "http://x/1.mp4" {
+		t.Errorf("episode URL = %q, want http://x/1.mp4", detail.Seasons[0].Episodes[0].URL)
+	}
+}
+
 func TestFailsOverToNextHostAndPinsIt(t *testing.T) {
 	var deadHits int32
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

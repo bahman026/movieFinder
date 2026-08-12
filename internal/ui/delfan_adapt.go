@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strconv"
+
 	"moviefinder/internal/api"
 	"moviefinder/internal/delfan"
 )
@@ -31,44 +33,53 @@ func delfanItemsToMovies(items []delfan.Item) []api.Movie {
 	return movies
 }
 
-// delfanDetailToDetail maps a Delfan detail onto api.Detail. resolved holds each
-// link's real file URL (parallel to d.DownloadLinks); where a link could not be
-// resolved, the play.php URL is kept as a fallback, since it still 302-redirects
-// to the file when opened.
+// delfanDetailToDetail maps a Delfan detail onto api.Detail.
+//
+// For films, resolved holds each link's real file URL (parallel to
+// d.DownloadLinks); an unresolved entry keeps its play.php URL, which still
+// 302-redirects to the file when opened. For series, the episode play.php URLs
+// are kept as-is — resolving every episode upfront would be dozens of requests,
+// and they redirect on play just the same.
 func delfanDetailToDetail(d delfan.Detail, resolved []string) api.Detail {
-	links := make([]api.DownloadLink, 0, len(d.DownloadLinks))
+	detail := api.Detail{
+		ID:           d.ID,
+		Title:        d.Title,
+		IMDBRating:   d.IMDBRating,
+		Description:  d.Description,
+		Release:      d.Year,
+		PosterURL:    d.PosterURL,
+		ThumbnailURL: d.ThumbnailURL,
+	}
+
 	for i, l := range d.DownloadLinks {
 		url := l.Link
 		if i < len(resolved) && resolved[i] != "" {
 			url = resolved[i]
 		}
-		links = append(links, api.DownloadLink{
-			ID:    itoa(l.ID),
-			Label: l.Describe(),
-			URL:   url,
+		detail.DownloadLinks = append(detail.DownloadLinks, api.DownloadLink{
+			ID: anyToStr(l.ID), Label: l.Describe(), URL: url,
 		})
 	}
-	return api.Detail{
-		ID:            d.ID,
-		Title:         d.Title,
-		IMDBRating:    d.IMDBRating,
-		Description:   d.Description,
-		Release:       d.Year,
-		PosterURL:     d.PosterURL,
-		ThumbnailURL:  d.ThumbnailURL,
-		DownloadLinks: links,
+
+	for _, s := range d.Seasons {
+		eps := make([]api.DownloadLink, 0, len(s.Episodes))
+		for _, e := range s.Episodes {
+			eps = append(eps, api.DownloadLink{ID: anyToStr(e.ID), Label: e.Describe(), URL: e.Link})
+		}
+		if len(eps) > 0 {
+			detail.Seasons = append(detail.Seasons, api.Season{Name: s.Name, Episodes: eps})
+		}
 	}
+	return detail
 }
 
-func itoa(n int) string {
-	if n == 0 {
-		return ""
+// anyToStr renders a JSON value that may be a number or a string as a string.
+func anyToStr(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		return strconv.FormatInt(int64(x), 10)
 	}
-	// small positive ids; avoid importing strconv for one call site elsewhere
-	digits := []byte{}
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
+	return ""
 }

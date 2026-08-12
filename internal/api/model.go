@@ -139,6 +139,44 @@ type Named struct {
 	URL  string `json:"url"`
 }
 
+// Season groups a series' episodes. A "season" here is usually a specific
+// quality/language cut (e.g. "1 480p زیرنویس" = season 1, 480p, subtitled), so
+// one real season can appear as several entries.
+type Season struct {
+	Name     string
+	Episodes []DownloadLink
+}
+
+// rawSeason is the season/episode shape from get_single_details.
+type rawSeason struct {
+	Name     string `json:"seasons_name"`
+	Episodes []struct {
+		ID   string `json:"episodes_id"`
+		Name string `json:"episodes_name"`
+		Size string `json:"file_size"`
+		URL  string `json:"file_url"`
+	} `json:"episodes"`
+}
+
+// seasonsFromRaw turns the raw season tree into the UI form, each episode
+// modelled as a DownloadLink so it renders and plays like any other link.
+func seasonsFromRaw(raw []rawSeason) []Season {
+	seasons := make([]Season, 0, len(raw))
+	for _, s := range raw {
+		eps := make([]DownloadLink, 0, len(s.Episodes))
+		for _, e := range s.Episodes {
+			if e.URL == "" {
+				continue
+			}
+			eps = append(eps, DownloadLink{ID: e.ID, Label: e.Name, FileSize: e.Size, URL: e.URL})
+		}
+		if len(eps) > 0 {
+			seasons = append(seasons, Season{Name: s.Name, Episodes: eps})
+		}
+	}
+	return seasons
+}
+
 // Detail is the get_single_details payload.
 type Detail struct {
 	ID             string         `json:"videos_id"`
@@ -161,10 +199,20 @@ type Detail struct {
 	Director       []Named        `json:"director"`
 	Cast           []Named        `json:"cast"`
 	RelatedMovie   []Movie        `json:"related_movie"`
+
+	// RawSeasons is the series' season/episode tree from the API (empty for
+	// films). Client.Details converts it into Seasons after decoding.
+	RawSeasons []rawSeason `json:"season"`
+	// Seasons is the UI-ready season list, filled from RawSeasons (playstore) or
+	// by the Delfan adapter. json:"-" so decoding never touches it.
+	Seasons []Season `json:"-"`
 }
 
 // DownloadsEnabled reports whether the API offers download links for this title.
 func (d Detail) DownloadsEnabled() bool { return d.EnableDownload == "1" }
+
+// IsSeries reports whether this title has seasons/episodes.
+func (d Detail) IsSeries() bool { return len(d.Seasons) > 0 }
 
 // Year is the release year, tolerating both "2016-12-16" and "2016".
 func (d Detail) Year() string {
