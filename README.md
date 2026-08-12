@@ -18,6 +18,16 @@ The result is a single self-contained `dist\MovieFinder.exe` — no runtime, no 
 
 The first build downloads the Go image and the mingw cross-compiler (a few minutes). Later builds reuse the layer cache. The build also emits `dist\go.sum`; `build.ps1` moves it into the repo root so dependency versions stay pinned from then on.
 
+### Build secrets (`.env`)
+
+The built-in OpenSubtitles key is **not** stored in source. Copy `.env.example` to `.env` and fill it in:
+
+```
+OPENSUBTITLES_API_KEY=your_key_here
+```
+
+`build.ps1` reads `.env` and injects each value into the binary at link time (`-ldflags -X`). `.env` is gitignored, so the key lives only in that local file and the compiled `.exe` (also gitignored) — never in the repository. Building without a `.env` just produces a binary with no built-in key, and users then supply their own under Settings.
+
 ### Tests
 
 ```powershell
@@ -38,12 +48,19 @@ Both are already handled in the Dockerfile, but worth knowing if you build elsew
 
 ## What it does
 
-- **Browse** the main listing as a poster grid, one page at a time (`get_movies`)
-- **Search** films, series and TV channels in one grid (`search`)
-- **Details** for the selected title — rating, genre, country, director, cast, description
+- **Two sources**, switchable from the dropdown in the toolbar: **MovieFinder** (the `playstore` API) and **Delfan** (a second, separate movie API)
+- **Browse** the main listing as a poster grid
+- **Search** by title
+- **Details** for the selected title — rating, genre, description, and its download links
 - **Show links** for the title, each with its full URL and a copy button
-- **Find Subtitles** — search and download from OpenSubtitles for the selected title
-- **Automatic host failover** between mirrors
+- **Find Subtitles** — search and download from OpenSubtitles for the selected title, on either source
+- **Automatic host failover** between mirrors (MovieFinder source)
+
+### The Delfan source
+
+A second movie catalogue on a separate set of servers, browsed and searched the same way as the primary source — pick **Delfan** in the toolbar dropdown. Browse shows the app's home page (newly added movies and series); search returns matches; the detail pane lists each quality's download link (which resolves to the real, signed file when opened). **Find Subtitles** works here too, and searches OpenSubtitles by the film's English title, which the client parses out of the Persian description.
+
+Its API signs every request, so the client logs in, seeds a rolling per-request nonce, and threads that nonce through each call automatically — see `internal/delfan` and the architecture notes in CLAUDE.md. The two hosts rotate occasionally; if the source stops working, override them under `Settings → Delfan API host`.
 
 The app does not download the movie files themselves; it surfaces the links for you to hand to whatever downloader you prefer. Subtitles are the one thing it does download directly, since they're small and the whole point is to save one next to the video.
 
@@ -115,6 +132,7 @@ internal/api/client.go             endpoints, host failover, image fetch
 internal/api/model.go              Movie / Detail types, error-envelope detection
 internal/api/client_test.go        failover and decoding tests
 internal/config/config.go          settings load/save (%APPDATA%)
+internal/delfan/client.go          Delfan signed API: login, rolling nonce, search, details
 internal/opensubtitles/client.go   OpenSubtitles search and download
 internal/ui/app.go                 window, poster grid, detail pane, links
 internal/ui/poster.go              poster grid tiles and image cache

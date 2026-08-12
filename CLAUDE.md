@@ -44,6 +44,7 @@ These bit during initial setup and are already handled. Don't undo them:
 - **A local proxy (Fiddler) re-signs HTTPS.** Windows trusts `DO_NOT_TRUST_FiddlerRoot`, a fresh container does not, so module downloads fail with `x509: certificate signed by unknown authority`. `export-proxy-ca.ps1` exports the CA into `certs\`; the Dockerfile trusts everything there. Re-run it if the CA is regenerated. A plain `golang:` image will fail to fetch modules for this reason — always use the `build` target.
 - **`proxy.golang.org` is geo-blocked here.** Its zips come from Google Cloud Storage, which answers `403 ... this service is not available in your location`. The build uses `GOPROXY=https://goproxy.cn,direct`, overridable via `--build-arg GOPROXY=...`.
 - **The Dockerfile uses `go get ./... && go mod tidy -e`, not `go mod tidy`.** Plain `tidy` also walks the test-only dependencies of every dependency, pulling a long tail of modules the binary never links against and turning any mirror hiccup into a failed build.
+- **The built-in OpenSubtitles key is a build-time secret, not a source constant.** `opensubtitles.DefaultAPIKey` is an empty `var` in source; the real key is injected by `build.ps1` from the gitignored `.env` via `-ldflags -X`. So the key lives only in `.env` (gitignored) and the compiled `.exe` (gitignored) — never in the repo. A build without `.env` just has no default key. If you add another baked-in secret, follow the same pattern: empty `var`, a `.env` line, a `--build-arg`, and an `-X` flag; do not turn it back into a `const`.
 - **Keep `.ps1` files ASCII-only.** Windows PowerShell 5.1 reads scripts as ANSI without a BOM; a UTF-8 em dash decodes into a smart quote that PowerShell treats as a string delimiter, breaking the parse in a place far from the real character.
 - `-H windowsgui` in the link flags suppresses the console window behind the GUI. Drop it temporarily if you need to see stdout while debugging.
 - **The committed `go.mod`/`go.sum` must be the full ones, not the minimal file with just the direct `fyne.io/fyne/v2` require line.** The Dockerfile runs `go get ./...` inside the image to fill in the ~30 indirect requirements; both files are exported back out (`export` stage `COPY`s them, `build.ps1` moves them to the repo root) so the project can be built without Docker resolving dependencies from scratch each time. If a build ever fails outside Docker with `go: updates to go.mod needed`, this is why — it means the exported file was reverted or never landed.
@@ -52,10 +53,11 @@ These bit during initial setup and are already handled. Don't undo them:
 
 ```
 cmd/moviefinder  -> internal/ui  -> internal/api            -> internal/config
+                               |-> internal/delfan
                                \-> internal/opensubtitles
 ```
 
-`internal/opensubtitles` is independent of `internal/api` — it only needs a title, IMDb id and year, which `internal/ui` extracts from an `api.Detail` before calling it.
+`internal/opensubtitles` and `internal/delfan` are independent of `internal/api`. The UI switches between two content sources (`sourceMovieFinder`, `sourceDelfan`); `delfan_adapt.go` converts Delfan's types onto `api.Movie`/`api.Detail` so the poster grid and detail pane render both without knowing which source they came from. `fetch`/`fetchDetail` in `app.go` are the two branch points.
 
 ### The API and its two quirks
 
@@ -85,6 +87,19 @@ Field names that lie, confirmed against live responses:
 `Client.fetch` returns a `tryNext bool` alongside its error, which decides whether the failure is the host's fault. Transport errors and `5xx` are retryable; `4xx` is not, because it would fail identically on every mirror. Adding a new failure case means deciding which side it falls on.
 
 Config lives at `%APPDATA%\MovieFinder\config.json`. `config.Load` starts from `Default()` and unmarshals over it, so fields added later keep a sane value when an older file is read.
+
+### The Delfan source and its request signing
+
+`internal/delfan` talks to a second movie API whose every gated request carries two client-computed fields, reverse-engineered from the app. Do not "clean up" the constants or the call ordering — they are load-bearing:
+
+- **`body`** — built once per session by `buildBody`: `MD5(rand+"cotation") + auth + "fdaa94a151e2c5d4" + "74a290e8" + auth + "y87mdjsodon" + appversion + MD5(date+"cotation")`. The two MD5 halves are padding the server cannot verify; the real payload is the login `auth` token embedded twice.
+- **`an`** — a rolling anti-replay nonce, `MD5(q1 + q2 + 101)`. `q1`/`q2` are integers the server returns in **every** response, and each gated request must carry the nonce derived from the **previous** response's q1/q2. `roundtrip` threads this state: sign with the current q1/q2, send, then advance from the reply. This is why requests serialize on `c.mu` — two concurrent calls would reuse a nonce and one would be rejected.
+
+The nonce is **per-host**: login is on one host, the gated endpoints on another, so `ensureSession` makes a `vitrin` call (which does not validate the nonce) on the gated host purely to seed its q1/q2 before the first real request. Getting this ordering wrong yields the server's generic `"N - error identifying connection"` — where N advancing (1→2) means you cleared one gate and hit the next.
+
+Both hosts rotate; the app rediscovers them from fragmented fields split across a response (e.g. `protocol`+`dtile`+`sim`+`chart` reassemble into the API host). The client uses hardcoded defaults overridable via config rather than reimplementing that discovery. Download links are `play.php` URLs that 302-redirect to the real signed file; `ResolveDownloadURL` reads the `Location` header rather than following it (`CheckRedirect` returns `ErrUseLastResponse`).
+
+`TestSearchThreadsTheRollingNonce` and `TestStaleNonceIsRejected` guard the chain; the opt-in `DELFAN_LIVE=1` tests exercise it against the real servers.
 
 ### Why the hosts default to `http://`
 
