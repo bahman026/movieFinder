@@ -12,10 +12,10 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/adlas/moviefinder/internal/api"
-	"github.com/adlas/moviefinder/internal/config"
-	"github.com/adlas/moviefinder/internal/delfan"
-	"github.com/adlas/moviefinder/internal/opensubtitles"
+	"moviefinder/internal/api"
+	"moviefinder/internal/config"
+	"moviefinder/internal/delfan"
+	"moviefinder/internal/opensubtitles"
 )
 
 // showSettings opens the configuration dialog and applies the result.
@@ -52,6 +52,8 @@ func (u *UI) showSettings() {
 	delfanLoginHost := entryWith(cfg.DelfanLoginHost, delfan.DefaultLoginHost+" (default)")
 	delfanAPIHost := entryWith(cfg.DelfanAPIHost, delfan.DefaultAPIHost+" (default)")
 
+	playerPath := entryWith(cfg.PlayerPath, "auto-detect (PotPlayer, mpv, VLC, MPC-HC)")
+
 	// collect turns the current field values into a Config.
 	collect := func() config.Config {
 		next := cfg
@@ -73,6 +75,7 @@ func (u *UI) showSettings() {
 		}
 		next.DelfanLoginHost = strings.TrimSpace(delfanLoginHost.Text)
 		next.DelfanAPIHost = strings.TrimSpace(delfanAPIHost.Text)
+		next.PlayerPath = strings.TrimSpace(playerPath.Text)
 		if n, err := strconv.Atoi(timeout.Text); err == nil && n > 0 {
 			next.TimeoutSeconds = n
 		}
@@ -131,6 +134,7 @@ func (u *UI) showSettings() {
 		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Optional — overrides the built-in key. Get your own at " + opensubtitles.RegisterURL},
 		{Text: "Delfan login host", Widget: delfanLoginHost, HintText: "Leave blank for the default. Change if the Delfan source stops working."},
 		{Text: "Delfan API host", Widget: delfanAPIHost},
+		{Text: "Video player", Widget: playerPath, HintText: "Path to a player exe, or blank to auto-detect. Play passes the stream and subtitle to it."},
 	}
 
 	d := dialog.NewForm("Settings", "Save", "Cancel", form, func(ok bool) {

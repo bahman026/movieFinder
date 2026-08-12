@@ -15,10 +15,11 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/adlas/moviefinder/internal/api"
-	"github.com/adlas/moviefinder/internal/config"
-	"github.com/adlas/moviefinder/internal/delfan"
-	"github.com/adlas/moviefinder/internal/opensubtitles"
+	"moviefinder/internal/api"
+	"moviefinder/internal/config"
+	"moviefinder/internal/delfan"
+	"moviefinder/internal/opensubtitles"
+	"moviefinder/internal/stream"
 )
 
 // Sources the user can switch between.
@@ -27,7 +28,7 @@ const (
 	sourceDelfan      = "Delfan"
 )
 
-const appID = "at.adlas.moviefinder"
+const appID = "com.moviefinder.app"
 
 // UI owns the window and the state shown in it.
 type UI struct {
@@ -66,11 +67,21 @@ type UI struct {
 	search     *widget.Entry
 	status     *widget.Label
 	hostLabel  *widget.Label
-	info       *widget.RichText
+	info       *widget.Entry
+	infoText   string // the intended details text, so edits can be reverted
+	imdbLink   *widget.Hyperlink
 	linkBox    *fyne.Container
-	pageLabel  *widget.Label
-	prevButton *widget.Button
-	nextButton *widget.Button
+	pageLabel   *widget.Label
+	prevButton  *widget.Button
+	nextButton  *widget.Button
+	playDialog  dialog.Dialog
+	dlControls  *fyne.Container
+	pauseButton *widget.Button
+	cancelBtn   *widget.Button
+
+	// activeStream is the current download-while-playing server, if any. A new
+	// playback stops the previous one.
+	activeStream *stream.Server
 }
 
 // Run builds the window and blocks until it is closed.
@@ -78,7 +89,9 @@ func Run() {
 	cfg, err := config.Load()
 
 	a := fyneapp.NewWithID(appID)
+	a.SetIcon(appIcon)
 	w := a.NewWindow("MovieFinder")
+	w.SetIcon(appIcon)
 	w.Resize(fyne.NewSize(1180, 760))
 
 	u := &UI{
@@ -112,6 +125,7 @@ func (u *UI) build() fyne.CanvasObject {
 	searchButton := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
 		u.setQuery(u.search.Text)
 	})
+	searchButton.Importance = widget.HighImportance
 	clearButton := widget.NewButtonWithIcon("", theme.ContentClearIcon(), func() {
 		u.search.SetText("")
 		u.setQuery("")
@@ -119,7 +133,7 @@ func (u *UI) build() fyne.CanvasObject {
 	refreshButton := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		u.reload(u.currentPage())
 	})
-	settingsButton := widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), func() {
+	settingsButton := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
 		u.showSettings()
 	})
 
@@ -133,11 +147,16 @@ func (u *UI) build() fyne.CanvasObject {
 	})
 	sourceSelect.SetSelected(sourceMovieFinder)
 
+	// Search box with its search/clear buttons attached on the right, and the
+	// source picker + settings on the outer edges — one clean top row.
+	searchBox := container.NewBorder(nil, nil, nil,
+		container.NewHBox(searchButton, clearButton), u.search)
 	toolbar := container.NewBorder(nil, nil,
-		sourceSelect,
-		container.NewHBox(searchButton, clearButton, refreshButton, settingsButton),
-		u.search,
+		container.NewHBox(sourceSelect, refreshButton),
+		settingsButton,
+		searchBox,
 	)
+	top := container.NewVBox(container.NewPadded(toolbar), widget.NewSeparator())
 
 	u.grid = u.buildGrid()
 	split := container.NewHSplit(u.grid, u.buildDetailPane())
@@ -145,8 +164,10 @@ func (u *UI) build() fyne.CanvasObject {
 
 	u.status = widget.NewLabel("Loading…")
 	u.hostLabel = widget.NewLabel("")
+	u.hostLabel.TextStyle = fyne.TextStyle{Italic: true}
 
-	u.pageLabel = widget.NewLabel("Page 1")
+	// Pager: prev / "Page N" / next as one tidy centred group.
+	u.pageLabel = widget.NewLabelWithStyle("Page 1", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	u.prevButton = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
 		if p := u.currentPage(); p > 1 {
 			u.reload(p - 1)
@@ -156,13 +177,23 @@ func (u *UI) build() fyne.CanvasObject {
 		u.reload(u.currentPage() + 1)
 	})
 	u.prevButton.Disable()
+	pager := container.NewHBox(u.prevButton, u.pageLabel, u.nextButton)
 
-	statusBar := container.NewBorder(nil, nil, nil,
-		container.NewHBox(u.prevButton, u.pageLabel, u.nextButton),
+	// Download controls, shown only while a download-while-playing is active.
+	u.pauseButton = widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), u.togglePause)
+	u.cancelBtn = widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), u.cancelDownload)
+	u.cancelBtn.Importance = widget.DangerImportance
+	u.dlControls = container.NewHBox(u.pauseButton, u.cancelBtn)
+	u.dlControls.Hide()
+
+	statusBar := container.NewBorder(nil, nil,
 		container.NewVBox(u.status, u.hostLabel),
+		container.NewHBox(u.dlControls, pager),
+		nil,
 	)
+	bottom := container.NewVBox(widget.NewSeparator(), container.NewPadded(statusBar))
 
-	return container.NewBorder(toolbar, statusBar, nil, nil, split)
+	return container.NewBorder(top, bottom, nil, nil, split)
 }
 
 func (u *UI) buildGrid() *widget.GridWrap {
@@ -216,27 +247,48 @@ func (u *UI) loadPoster(url string, apply func(fyne.Resource)) {
 }
 
 func (u *UI) buildDetailPane() fyne.CanvasObject {
-	u.info = widget.NewRichTextFromMarkdown("_Select a title to see its links._")
+	// A multi-line entry (not RichText) so the text can be selected and copied.
+	// Kept enabled — not Disable()d — so the text uses the normal readable theme
+	// colour rather than the greyed disabled colour; edits are reverted below so
+	// it behaves as read-only.
+	u.info = widget.NewMultiLineEntry()
 	u.info.Wrapping = fyne.TextWrapWord
+	u.infoText = "Select a title to see its details."
+	u.info.SetText(u.infoText)
+	u.info.OnChanged = func(s string) {
+		if s != u.infoText {
+			u.info.SetText(u.infoText) // read-only: undo any typing
+		}
+	}
 
-	subtitlesButton := widget.NewButtonWithIcon("Find Subtitles", theme.SearchIcon(), func() {
+	u.imdbLink = widget.NewHyperlink("", nil)
+	u.imdbLink.Hide()
+
+	copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+		if text := strings.TrimSpace(u.info.Text); text != "" {
+			u.window.Clipboard().SetContent(text)
+			u.setStatus("Details copied.")
+		}
+	})
+	copyButton.Importance = widget.LowImportance
+	subtitlesButton := widget.NewButtonWithIcon("Subtitles", theme.SearchIcon(), func() {
 		u.showSubtitles()
 	})
 
 	u.linkBox = container.NewVBox()
 
-	content := container.NewVBox(
-		u.info,
-		subtitlesButton,
-		widget.NewSeparator(),
-		u.linkBox,
+	header := container.NewBorder(nil, nil,
+		widget.NewLabelWithStyle("Details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewHBox(u.imdbLink, copyButton, subtitlesButton),
+		nil,
 	)
 
-	return container.NewBorder(
-		widget.NewLabelWithStyle("Details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		nil, nil, nil,
-		container.NewVScroll(content),
-	)
+	// A split gives the selectable details and the links their own scrollable
+	// areas, so a long description does not push the links off-screen.
+	body := container.NewVSplit(u.info, container.NewVScroll(u.linkBox))
+	body.Offset = 0.55
+
+	return container.NewBorder(container.NewVBox(header, widget.NewSeparator()), nil, nil, nil, body)
 }
 
 // setQuery switches between browsing and searching.
@@ -297,7 +349,7 @@ func (u *UI) reload(page int) {
 			u.grid.UnselectAll()
 			u.grid.Refresh()
 			u.grid.ScrollToTop()
-			u.clearDetail("_Select a title to see its links._")
+			u.clearDetail("Select a title to see its details.")
 
 			u.pageLabel.SetText(fmt.Sprintf("Page %d", page))
 			if paged {
@@ -377,7 +429,7 @@ func (u *UI) loadDetail(index int) {
 	source := u.source
 	u.mu.RUnlock()
 
-	u.clearDetail("## " + movie.Title + "\n\n_Loading…_")
+	u.clearDetail(movie.Title + "\n\nLoading…")
 
 	go func() {
 		detail, sub, err := u.fetchDetail(ctx, source, movie)
@@ -387,7 +439,7 @@ func (u *UI) loadDetail(index int) {
 
 		fyne.Do(func() {
 			if err != nil {
-				u.info.ParseMarkdown("## " + movie.Title + "\n\nCould not load details: " + err.Error())
+				u.setInfo(movie.Title + "\n\nCould not load details: " + err.Error())
 				return
 			}
 
@@ -397,7 +449,14 @@ func (u *UI) loadDetail(index int) {
 			u.subTitle, u.subIMDB, u.subYear = sub.title, sub.imdb, sub.year
 			u.mu.Unlock()
 
-			u.info.ParseMarkdown(renderDetail(detail))
+			u.setInfo(renderDetail(detail))
+			if link := imdbLink(detail.IMDBID); link != "" {
+				u.imdbLink.SetText("View on IMDb")
+				_ = u.imdbLink.SetURLFromString(link)
+				u.imdbLink.Show()
+			} else {
+				u.imdbLink.Hide()
+			}
 			u.showLinks(detail.DownloadLinks)
 		})
 	}()
@@ -461,13 +520,17 @@ func (u *UI) showLinks(links []api.DownloadLink) {
 		field.Wrapping = fyne.TextWrapOff
 		field.Disable()
 
+		playButton := widget.NewButtonWithIcon("Play", theme.MediaPlayIcon(), func() {
+			u.playLink(link.URL, link.Describe())
+		})
+		playButton.Importance = widget.HighImportance
 		copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
 			u.window.Clipboard().SetContent(link.URL)
 			u.setStatus("Copied: " + link.Describe())
 		})
 
 		u.linkBox.Add(container.NewVBox(
-			container.NewBorder(nil, nil, nil, copyButton, label),
+			container.NewBorder(nil, nil, nil, container.NewHBox(playButton, copyButton), label),
 			field,
 			widget.NewSeparator(),
 		))
@@ -475,16 +538,17 @@ func (u *UI) showLinks(links []api.DownloadLink) {
 	u.linkBox.Refresh()
 }
 
+// renderDetail builds the plain-text details shown in the selectable box.
 func renderDetail(d api.Detail) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## %s\n\n", d.Title)
+	b.WriteString(d.Title + "\n\n")
 	if d.Writer != "" {
-		fmt.Fprintf(&b, "%s\n\n", d.Writer)
+		b.WriteString(d.Writer + "\n\n")
 	}
 
 	writeField(&b, "Released", d.Release)
 	writeField(&b, "Runtime", d.Runtime)
-	writeField(&b, "IMDb", strings.TrimSpace(d.IMDBRating+" ("+d.IMDBID+")"))
+	writeField(&b, "IMDb rating", strings.TrimSpace(d.IMDBRating))
 	writeField(&b, "Quality", d.VideoQuality)
 	writeField(&b, "Genre", joinNames(d.Genre))
 	writeField(&b, "Country", joinNames(d.Country))
@@ -494,13 +558,35 @@ func renderDetail(d api.Detail) string {
 	}
 
 	if d.Description != "" {
-		fmt.Fprintf(&b, "\n%s\n", d.Description)
+		b.WriteString("\n" + d.Description + "\n")
 	}
 	return b.String()
 }
 
-func (u *UI) clearDetail(markdown string) {
-	u.info.ParseMarkdown(markdown)
+// imdbLink builds the public IMDb URL for a title id, or "" when there is none.
+func imdbLink(imdbID string) string {
+	id := strings.TrimSpace(imdbID)
+	if id == "" {
+		return ""
+	}
+	if !strings.HasPrefix(id, "tt") {
+		id = "tt" + id
+	}
+	return "https://www.imdb.com/title/" + id + "/"
+}
+
+// setInfo sets the details text and remembers it, so the read-only revert in
+// the entry's OnChanged knows what to restore.
+func (u *UI) setInfo(text string) {
+	u.infoText = text
+	u.info.SetText(text)
+}
+
+func (u *UI) clearDetail(text string) {
+	u.setInfo(text)
+	if u.imdbLink != nil {
+		u.imdbLink.Hide()
+	}
 	u.mu.Lock()
 	u.links = nil
 	u.detail = api.Detail{}
@@ -538,7 +624,7 @@ func writeField(b *strings.Builder, label, value string) {
 	if strings.TrimSpace(value) == "" || strings.TrimSpace(value) == "()" {
 		return
 	}
-	fmt.Fprintf(b, "- **%s:** %s\n", label, value)
+	fmt.Fprintf(b, "%s: %s\n", label, value)
 }
 
 func joinNames(items []api.Named) string {

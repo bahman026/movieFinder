@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"github.com/adlas/moviefinder/internal/api"
-	"github.com/adlas/moviefinder/internal/delfan"
+	"moviefinder/internal/api"
+	"moviefinder/internal/delfan"
 )
 
 // The Delfan source produces its own types; these converters map them onto the
