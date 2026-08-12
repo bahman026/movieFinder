@@ -11,7 +11,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/adlas/moviefinder/internal/api"
+	"moviefinder/internal/api"
 )
 
 // Card geometry. The poster is a 2:3 portrait, matching what the API serves.

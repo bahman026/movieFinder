@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adlas/moviefinder/internal/config"
+	"moviefinder/internal/config"
 )
 
 // These tests hit the real servers, so they are opt-in:
