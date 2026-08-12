@@ -24,6 +24,26 @@ var currentBaseURL = "https://api.opensubtitles.com/api/v1"
 // rather than any subtitle data, confirmed against the live service.
 const RegisterURL = "https://www.opensubtitles.com/en/consumers"
 
+// DefaultAPIKey is the built-in key, so subtitle search works out of the box.
+// A key the user enters in Settings overrides it (see ResolveKey). It is never
+// shown in the Settings field — an empty field there means "use this default".
+//
+// It is EMPTY here on purpose. The real key lives in key.go, which is
+// gitignored: it is compiled into the binary but never committed, so the secret
+// stays out of the repository while needing nothing external at build or run
+// time. If key.go is absent the build still works with no built-in key. Keep
+// this an assignable var — key.go's init() overwrites it.
+var DefaultAPIKey = ""
+
+// ResolveKey returns the user's key when they have set one, otherwise the
+// built-in DefaultAPIKey.
+func ResolveKey(userKey string) string {
+	if k := strings.TrimSpace(userKey); k != "" {
+		return k
+	}
+	return DefaultAPIKey
+}
+
 // Client searches and downloads subtitles.
 //
 // Downloads made without logging in are quota-limited per IP by OpenSubtitles,

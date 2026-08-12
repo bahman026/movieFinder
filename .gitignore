@@ -6,3 +6,7 @@ dist/
 
 # Machine-local TLS-interception CAs exported by export-proxy-ca.ps1.
 certs/*.crt
+
+# Built-in API key, compiled in but kept out of the repo. key.go.example is the
+# committed template; the real key.go is never committed.
+internal/opensubtitles/key.go
