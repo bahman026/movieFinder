@@ -43,6 +43,11 @@ type Config struct {
 	// free one at https://www.opensubtitles.com/en/consumers — without it the
 	// API refuses every request.
 	OpenSubtitlesAPIKey string `json:"opensubtitles_api_key"`
+
+	// Delfan hosts. Both rotate, so these are overridable; empty falls back to
+	// the current defaults baked into the delfan client.
+	DelfanLoginHost string `json:"delfan_login_host"`
+	DelfanAPIHost   string `json:"delfan_api_host"`
 }
 
 // Default returns the working settings for the known API.
