@@ -1,7 +1,8 @@
-Website = "https://adlas.at"
+Website = ""
 
 [Details]
+Icon = "Icon.png"
 Name = "MovieFinder"
-ID = "at.adlas.moviefinder"
+ID = "com.moviefinder.app"
 Version = "0.1.0"
 Build = 1

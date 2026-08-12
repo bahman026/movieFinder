@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adlas/moviefinder/internal/config"
+	"moviefinder/internal/config"
 )
 
 // Client calls the API, failing over between the configured hosts.

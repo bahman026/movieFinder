@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/adlas/moviefinder/internal/config"
+	"moviefinder/internal/config"
 )
 
 // sampleListing mirrors the real get_movies payload: a bare array of strings.

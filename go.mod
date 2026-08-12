@@ -1,4 +1,4 @@
-module github.com/adlas/moviefinder
+module moviefinder
 
 go 1.23
 
