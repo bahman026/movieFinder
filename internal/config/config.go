@@ -48,6 +48,10 @@ type Config struct {
 	// the current defaults baked into the delfan client.
 	DelfanLoginHost string `json:"delfan_login_host"`
 	DelfanAPIHost   string `json:"delfan_api_host"`
+
+	// PlayerPath is an explicit external video player executable. Empty means
+	// auto-detect (PotPlayer, mpv, VLC, MPC-HC).
+	PlayerPath string `json:"player_path"`
 }
 
 // Default returns the working settings for the known API.

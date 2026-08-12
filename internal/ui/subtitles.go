@@ -14,7 +14,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/adlas/moviefinder/internal/opensubtitles"
+	"moviefinder/internal/opensubtitles"
 )
 
 // subtitleLanguages are the choices offered in the language picker — enough to
