@@ -132,8 +132,8 @@ func (u *UI) showSettings() {
 		{Text: "Timeout (s)", Widget: timeout},
 		{Text: "", Widget: container.NewVBox(testButton, testResult)},
 		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Optional — overrides the built-in key. Get your own at " + opensubtitles.RegisterURL},
-		{Text: "Delfan login host", Widget: delfanLoginHost, HintText: "Leave blank for the default. Change if the Delfan source stops working."},
-		{Text: "Delfan API host", Widget: delfanAPIHost},
+		{Text: "Database 2 login host", Widget: delfanLoginHost, HintText: "Leave blank for the default. Change if the Database 2 source stops working."},
+		{Text: "Database 2 API host", Widget: delfanAPIHost},
 		{Text: "Video player", Widget: playerPath, HintText: "Path to a player exe, or blank to auto-detect. Play passes the stream and subtitle to it."},
 	}
 

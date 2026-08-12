@@ -36,8 +36,8 @@ func (u *UI) playLink(videoURL, linkLabel string) {
 	imdbID := u.subIMDB
 	u.mu.RUnlock()
 
+	// Unchecked by default: stream-only. Tick it to also save a copy.
 	downloadCheck := widget.NewCheck("Download while playing (save a copy)", nil)
-	downloadCheck.SetChecked(true)
 
 	// doPlay is the single commit point for every play action in this dialog.
 	// The subtitle is passed as bytes (not a path) because where it is written

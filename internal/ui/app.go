@@ -4,12 +4,15 @@ package ui
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -22,11 +25,58 @@ import (
 	"moviefinder/internal/stream"
 )
 
-// Sources the user can switch between.
+// Sources the user can switch between. The strings are both the identifier and
+// the label shown in the header switcher.
 const (
-	sourceMovieFinder = "MovieFinder"
-	sourceDelfan      = "Delfan"
+	sourceMovieFinder = "Database 1"
+	sourceDelfan      = "Database 2"
 )
+
+// Sort modes for the results grid.
+const (
+	sortDefault  = "Sort: default"
+	sortIMDBDesc = "IMDb high→low"
+	sortIMDBAsc  = "IMDb low→high"
+	sortYearDesc = "Year newest"
+	sortYearAsc  = "Year oldest"
+	sortTitleAsc = "Title A→Z"
+)
+
+var sortModes = []string{sortDefault, sortIMDBDesc, sortIMDBAsc, sortYearDesc, sortYearAsc, sortTitleAsc}
+
+// sortMovies orders movies in place by the given mode. "Default" leaves the
+// server's order untouched.
+func sortMovies(movies []api.Movie, mode string) {
+	switch mode {
+	case sortIMDBDesc:
+		sort.SliceStable(movies, func(i, j int) bool { return imdbValue(movies[i]) > imdbValue(movies[j]) })
+	case sortIMDBAsc:
+		sort.SliceStable(movies, func(i, j int) bool { return imdbValue(movies[i]) < imdbValue(movies[j]) })
+	case sortYearDesc:
+		sort.SliceStable(movies, func(i, j int) bool { return yearValue(movies[i]) > yearValue(movies[j]) })
+	case sortYearAsc:
+		sort.SliceStable(movies, func(i, j int) bool { return yearValue(movies[i]) < yearValue(movies[j]) })
+	case sortTitleAsc:
+		sort.SliceStable(movies, func(i, j int) bool {
+			return strings.ToLower(movies[i].Title) < strings.ToLower(movies[j].Title)
+		})
+	}
+}
+
+// imdbValue parses a rating; a missing/invalid one sorts to the bottom of a
+// high→low sort (and the top of low→high).
+func imdbValue(m api.Movie) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(m.IMDBRating), 64)
+	if err != nil {
+		return -1
+	}
+	return v
+}
+
+func yearValue(m api.Movie) int {
+	v, _ := strconv.Atoi(m.Year())
+	return v
+}
 
 const appID = "com.moviefinder.app"
 
@@ -45,6 +95,8 @@ type UI struct {
 	// callbacks read on the UI thread.
 	mu       sync.RWMutex
 	source   string
+	sortMode string
+	castMode bool
 	movies   []api.Movie
 	detail   api.Detail
 	links    []api.DownloadLink
@@ -63,14 +115,18 @@ type UI struct {
 	cancelLoad   context.CancelFunc
 	cancelDetail context.CancelFunc
 
-	grid       *widget.GridWrap
-	search     *widget.Entry
-	status     *widget.Label
-	hostLabel  *widget.Label
-	info       *widget.Entry
-	infoText   string // the intended details text, so edits can be reverted
-	imdbLink   *widget.Hyperlink
-	linkBox    *fyne.Container
+	grid         *widget.GridWrap
+	sourceSelect *widget.Select
+	search       *widget.Entry
+	status      *widget.Label
+	hostLabel   *widget.Label
+	loadingBar  *widget.ProgressBarInfinite
+	info        *widget.Entry
+	infoText    string // the intended details text, so edits can be reverted
+	imdbLink    *widget.Hyperlink
+	detailImage *canvas.Image
+	detailWant  string // the poster URL the detail pane currently expects
+	linkBox     *fyne.Container
 	pageLabel   *widget.Label
 	prevButton  *widget.Button
 	nextButton  *widget.Button
@@ -103,6 +159,7 @@ func Run() {
 		subtitles: opensubtitles.New(opensubtitles.ResolveKey(cfg.OpenSubtitlesAPIKey)),
 		images:    newImageCache(),
 		source:    sourceMovieFinder,
+		sortMode:  sortDefault,
 		page:      1,
 		selected:  -1,
 	}
@@ -137,30 +194,73 @@ func (u *UI) build() fyne.CanvasObject {
 		u.showSettings()
 	})
 
-	sourceSelect := widget.NewSelect([]string{sourceMovieFinder, sourceDelfan}, func(name string) {
+	// Callback attached below, after the widgets it drives exist; SetSelected
+	// fires it immediately and Run() does the first load itself.
+	sourceSelect := widget.NewSelect([]string{sourceMovieFinder, sourceDelfan}, nil)
+	sourceSelect.SetSelected(sourceMovieFinder)
+	u.sourceSelect = sourceSelect
+
+	// Callback attached after the grid/detail pane exist (below), since
+	// SetSelected fires it immediately.
+	sortSelect := widget.NewSelect(sortModes, nil)
+	sortSelect.SetSelected(sortDefault)
+
+	// "Cast" toggle: when on, the search box takes an actor/director name and
+	// returns their movies (Delfan source only).
+	castCheck := widget.NewCheck("Cast", func(on bool) {
+		u.mu.Lock()
+		u.castMode = on
+		alreadyDelfan := u.source == sourceDelfan
+		u.mu.Unlock()
+		if on {
+			u.search.SetPlaceHolder("Actor / director name…")
+			// Cast search only works on Delfan, so switch there automatically.
+			if !alreadyDelfan {
+				u.sourceSelect.SetSelected(sourceDelfan)
+			}
+		} else {
+			u.search.SetPlaceHolder("Search movies and series, or leave empty to browse")
+		}
+	})
+
+	// Search box with its cast toggle + search/clear buttons, and the source
+	// picker + sort + settings on the outer edges — one clean top row.
+	searchBox := container.NewBorder(nil, nil, castCheck,
+		container.NewHBox(searchButton, clearButton), u.search)
+	toolbar := container.NewBorder(nil, nil,
+		container.NewHBox(sourceSelect, sortSelect, refreshButton),
+		settingsButton,
+		searchBox,
+	)
+
+	// A thin indeterminate bar shown only while a listing is loading.
+	u.loadingBar = widget.NewProgressBarInfinite()
+	u.loadingBar.Hide()
+	top := container.NewVBox(container.NewPadded(toolbar), u.loadingBar, widget.NewSeparator())
+
+	u.grid = u.buildGrid()
+	split := container.NewHSplit(u.grid, u.buildDetailPane())
+	split.Offset = 0.63
+
+	// Now that the grid and detail pane exist, wiring the pickers is safe.
+	sourceSelect.OnChanged = func(name string) {
 		u.mu.Lock()
 		u.source = name
 		u.query = ""
 		u.mu.Unlock()
 		u.search.SetText("")
 		u.reload(1)
-	})
-	sourceSelect.SetSelected(sourceMovieFinder)
-
-	// Search box with its search/clear buttons attached on the right, and the
-	// source picker + settings on the outer edges — one clean top row.
-	searchBox := container.NewBorder(nil, nil, nil,
-		container.NewHBox(searchButton, clearButton), u.search)
-	toolbar := container.NewBorder(nil, nil,
-		container.NewHBox(sourceSelect, refreshButton),
-		settingsButton,
-		searchBox,
-	)
-	top := container.NewVBox(container.NewPadded(toolbar), widget.NewSeparator())
-
-	u.grid = u.buildGrid()
-	split := container.NewHSplit(u.grid, u.buildDetailPane())
-	split.Offset = 0.63
+	}
+	sortSelect.OnChanged = func(mode string) {
+		u.mu.Lock()
+		u.sortMode = mode
+		sortMovies(u.movies, mode)
+		u.mu.Unlock()
+		u.grid.UnselectAll()
+		u.grid.ScrollToTop()
+		u.grid.Refresh()
+		u.clearDetail("Select a title to see its details.")
+	}
 
 	u.status = widget.NewLabel("Loading…")
 	u.hostLabel = widget.NewLabel("")
@@ -186,12 +286,14 @@ func (u *UI) build() fyne.CanvasObject {
 	u.dlControls = container.NewHBox(u.pauseButton, u.cancelBtn)
 	u.dlControls.Hide()
 
+	// Single-row status bar: status text on the left, server + download
+	// controls + pager on the right. One line keeps it compact.
 	statusBar := container.NewBorder(nil, nil,
-		container.NewVBox(u.status, u.hostLabel),
-		container.NewHBox(u.dlControls, pager),
+		u.status,
+		container.NewHBox(u.hostLabel, u.dlControls, pager),
 		nil,
 	)
-	bottom := container.NewVBox(widget.NewSeparator(), container.NewPadded(statusBar))
+	bottom := container.NewVBox(widget.NewSeparator(), statusBar)
 
 	return container.NewBorder(top, bottom, nil, nil, split)
 }
@@ -264,6 +366,11 @@ func (u *UI) buildDetailPane() fyne.CanvasObject {
 	u.imdbLink = widget.NewHyperlink("", nil)
 	u.imdbLink.Hide()
 
+	// Poster shown alongside the details, beside the action buttons.
+	u.detailImage = canvas.NewImageFromResource(theme.BrokenImageIcon())
+	u.detailImage.FillMode = canvas.ImageFillContain
+	u.detailImage.SetMinSize(fyne.NewSize(120, 180))
+
 	copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
 		if text := strings.TrimSpace(u.info.Text); text != "" {
 			u.window.Clipboard().SetContent(text)
@@ -277,18 +384,41 @@ func (u *UI) buildDetailPane() fyne.CanvasObject {
 
 	u.linkBox = container.NewVBox()
 
-	header := container.NewBorder(nil, nil,
+	// The poster on the left; the actions and IMDb link stacked to its right.
+	actions := container.NewVBox(
 		widget.NewLabelWithStyle("Details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(u.imdbLink, copyButton, subtitlesButton),
-		nil,
+		container.NewHBox(copyButton, subtitlesButton),
+		u.imdbLink,
 	)
+	header := container.NewHBox(u.detailImage, actions)
 
 	// A split gives the selectable details and the links their own scrollable
 	// areas, so a long description does not push the links off-screen.
 	body := container.NewVSplit(u.info, container.NewVScroll(u.linkBox))
-	body.Offset = 0.55
+	body.Offset = 0.5
 
-	return container.NewBorder(container.NewVBox(header, widget.NewSeparator()), nil, nil, nil, body)
+	return container.NewBorder(container.NewVBox(container.NewPadded(header), widget.NewSeparator()), nil, nil, nil, body)
+}
+
+// setDetailPoster loads the first non-empty URL into the detail poster,
+// discarding a late result if the selection has since changed.
+func (u *UI) setDetailPoster(urls ...string) {
+	u.detailImage.Resource = theme.BrokenImageIcon()
+	u.detailImage.Refresh()
+	for _, url := range urls {
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		u.detailWant = url
+		u.loadPoster(url, func(res fyne.Resource) {
+			if u.detailWant == url {
+				u.detailImage.Resource = res
+				u.detailImage.Refresh()
+			}
+		})
+		return
+	}
+	u.detailWant = ""
 }
 
 // setQuery switches between browsing and searching.
@@ -310,29 +440,49 @@ func (u *UI) reload(page int) {
 	u.mu.RLock()
 	query := u.query
 	source := u.source
+	castMode := u.castMode
 	u.mu.RUnlock()
 
 	searching := query != ""
-	// Which combinations page: MovieFinder browse and Delfan search are paged;
-	// MovieFinder search (returns everything at once) and Delfan browse (a
-	// single home-page fetch) are not.
-	paged := (source == sourceMovieFinder && !searching) || (source == sourceDelfan && searching)
+	castSearch := castMode && searching
+
+	// Cast search only works on Delfan; guide the user instead of failing.
+	if castSearch && source != sourceDelfan {
+		u.mu.Lock()
+		u.movies = nil
+		u.selected = -1
+		u.mu.Unlock()
+		u.grid.UnselectAll()
+		u.grid.Refresh()
+		u.clearDetail("Select a title to see its details.")
+		u.setStatus("Cast search works on the " + sourceDelfan + " source — switch source to " + sourceDelfan + ".")
+		return
+	}
+
+	// Which combinations page: MovieFinder browse and Delfan (title) search are
+	// paged; MovieFinder search, Delfan browse, and cast search are not.
+	paged := !castSearch && ((source == sourceMovieFinder && !searching) || (source == sourceDelfan && searching))
 	if !paged {
 		page = 1
 	}
-	if searching {
+	switch {
+	case castSearch:
+		u.setStatus("Finding movies for " + query + "…")
+	case searching:
 		u.setStatus("Searching for " + query + "…")
-	} else {
+	default:
 		u.setStatus("Loading…")
 	}
+	u.loadingBar.Show()
 
 	go func() {
-		movies, host, err := u.fetch(ctx, source, query, searching, page)
+		movies, host, err := u.fetch(ctx, source, query, searching, castSearch, page)
 		if ctx.Err() != nil {
-			return // superseded by a newer request
+			return // superseded by a newer request; that request owns the bar
 		}
 
 		fyne.Do(func() {
+			u.loadingBar.Hide()
 			u.hostLabel.SetText("Server: " + host)
 			if err != nil {
 				u.setStatus("Failed: " + firstLine(err.Error()))
@@ -341,6 +491,7 @@ func (u *UI) reload(page int) {
 			}
 
 			u.mu.Lock()
+			sortMovies(movies, u.sortMode)
 			u.movies = movies
 			u.page = page
 			u.selected = -1
@@ -386,7 +537,21 @@ func (u *UI) reload(page int) {
 
 // fetch pulls a page of titles from the active source and returns the human
 // label for the server that answered.
-func (u *UI) fetch(ctx context.Context, source, query string, searching bool, page int) ([]api.Movie, string, error) {
+func (u *UI) fetch(ctx context.Context, source, query string, searching, castSearch bool, page int) ([]api.Movie, string, error) {
+	// Cast search (Delfan only): resolve the person, then list their movies.
+	if castSearch {
+		casts, err := u.delfan.SearchCast(ctx, query)
+		if err != nil {
+			return nil, sourceDelfan, err
+		}
+		if len(casts) == 0 {
+			return nil, sourceDelfan + " · no match", nil
+		}
+		person := casts[0]
+		items, _, err := u.delfan.CastMovies(ctx, person.ID, 1)
+		return delfanItemsToMovies(items), sourceDelfan + " · " + person.Name, err
+	}
+
 	if source == sourceDelfan {
 		var (
 			items []delfan.Item
@@ -397,7 +562,7 @@ func (u *UI) fetch(ctx context.Context, source, query string, searching bool, pa
 		} else {
 			items, err = u.delfan.Home(ctx)
 		}
-		return delfanItemsToMovies(items), "Delfan", err
+		return delfanItemsToMovies(items), sourceDelfan, err
 	}
 
 	var (
@@ -430,6 +595,7 @@ func (u *UI) loadDetail(index int) {
 	u.mu.RUnlock()
 
 	u.clearDetail(movie.Title + "\n\nLoading…")
+	u.setDetailPoster(movie.PosterURL, movie.ThumbnailURL)
 
 	go func() {
 		detail, sub, err := u.fetchDetail(ctx, source, movie)
@@ -457,7 +623,7 @@ func (u *UI) loadDetail(index int) {
 			} else {
 				u.imdbLink.Hide()
 			}
-			u.showLinks(detail.DownloadLinks)
+			u.showDetailContent(detail)
 		})
 	}()
 }
@@ -493,7 +659,17 @@ func (u *UI) fetchDetail(ctx context.Context, source string, movie api.Movie) (a
 	return detail, subMeta{title: detail.Title, imdb: imdbNumeric(detail.IMDBID), year: detail.Year()}, nil
 }
 
-// showLinks lists every link with its URL and a copy button.
+// showDetailContent fills the links area — a season/episode browser for a
+// series, or a flat list of download links for a film.
+func (u *UI) showDetailContent(d api.Detail) {
+	if d.IsSeries() {
+		u.showSeasons(d.Seasons)
+		return
+	}
+	u.showLinks(d.DownloadLinks)
+}
+
+// showLinks lists every link with a Play and a Copy button.
 func (u *UI) showLinks(links []api.DownloadLink) {
 	u.linkBox.RemoveAll()
 
@@ -503,39 +679,73 @@ func (u *UI) showLinks(links []api.DownloadLink) {
 		return
 	}
 
-	header := widget.NewLabelWithStyle(
-		fmt.Sprintf("Links (%d)", len(links)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	u.linkBox.Add(header)
-
+	u.linkBox.Add(widget.NewLabelWithStyle(
+		fmt.Sprintf("Links (%d)", len(links)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 	for _, link := range links {
-		link := link
-
-		label := widget.NewLabel(link.Describe())
-		label.TextStyle = fyne.TextStyle{Bold: true}
-
-		// A disabled entry rather than a label, so the URL stays selectable
-		// for copying by hand while being uneditable.
-		field := widget.NewEntry()
-		field.SetText(link.URL)
-		field.Wrapping = fyne.TextWrapOff
-		field.Disable()
-
-		playButton := widget.NewButtonWithIcon("Play", theme.MediaPlayIcon(), func() {
-			u.playLink(link.URL, link.Describe())
-		})
-		playButton.Importance = widget.HighImportance
-		copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
-			u.window.Clipboard().SetContent(link.URL)
-			u.setStatus("Copied: " + link.Describe())
-		})
-
-		u.linkBox.Add(container.NewVBox(
-			container.NewBorder(nil, nil, nil, container.NewHBox(playButton, copyButton), label),
-			field,
-			widget.NewSeparator(),
-		))
+		u.linkBox.Add(u.linkRow(link))
 	}
 	u.linkBox.Refresh()
+}
+
+// showSeasons renders a season picker and the chosen season's episodes.
+func (u *UI) showSeasons(seasons []api.Season) {
+	u.linkBox.RemoveAll()
+
+	names := make([]string, len(seasons))
+	for i, s := range seasons {
+		names[i] = fmt.Sprintf("%s  (%d episodes)", s.Name, len(s.Episodes))
+	}
+
+	episodes := container.NewVBox()
+	render := func(idx int) {
+		episodes.RemoveAll()
+		if idx >= 0 && idx < len(seasons) {
+			for _, ep := range seasons[idx].Episodes {
+				episodes.Add(u.linkRow(ep))
+			}
+		}
+		episodes.Refresh()
+	}
+
+	seasonSelect := widget.NewSelect(names, nil)
+	seasonSelect.OnChanged = func(string) { render(seasonSelect.SelectedIndex()) }
+
+	u.linkBox.Add(widget.NewLabelWithStyle(
+		fmt.Sprintf("Series — %d season/version(s)", len(seasons)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+	u.linkBox.Add(container.NewBorder(nil, nil, widget.NewLabel("Season:"), nil, seasonSelect))
+	u.linkBox.Add(widget.NewSeparator())
+	u.linkBox.Add(episodes)
+
+	seasonSelect.SetSelectedIndex(0) // triggers render of the first season
+	u.linkBox.Refresh()
+}
+
+// linkRow builds one Play/Copy row for a download link or an episode.
+func (u *UI) linkRow(link api.DownloadLink) fyne.CanvasObject {
+	label := widget.NewLabel(link.Describe())
+	label.TextStyle = fyne.TextStyle{Bold: true}
+
+	// A disabled entry rather than a label, so the URL stays selectable for
+	// copying by hand while being uneditable.
+	field := widget.NewEntry()
+	field.SetText(link.URL)
+	field.Wrapping = fyne.TextWrapOff
+	field.Disable()
+
+	playButton := widget.NewButtonWithIcon("Play", theme.MediaPlayIcon(), func() {
+		u.playLink(link.URL, link.Describe())
+	})
+	playButton.Importance = widget.HighImportance
+	copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+		u.window.Clipboard().SetContent(link.URL)
+		u.setStatus("Copied: " + link.Describe())
+	})
+
+	return container.NewVBox(
+		container.NewBorder(nil, nil, nil, container.NewHBox(playButton, copyButton), label),
+		field,
+		widget.NewSeparator(),
+	)
 }
 
 // renderDetail builds the plain-text details shown in the selectable box.
@@ -586,6 +796,11 @@ func (u *UI) clearDetail(text string) {
 	u.setInfo(text)
 	if u.imdbLink != nil {
 		u.imdbLink.Hide()
+	}
+	if u.detailImage != nil {
+		u.detailWant = ""
+		u.detailImage.Resource = theme.BrokenImageIcon()
+		u.detailImage.Refresh()
 	}
 	u.mu.Lock()
 	u.links = nil
