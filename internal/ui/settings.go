@@ -14,6 +14,7 @@ import (
 
 	"github.com/adlas/moviefinder/internal/api"
 	"github.com/adlas/moviefinder/internal/config"
+	"github.com/adlas/moviefinder/internal/delfan"
 	"github.com/adlas/moviefinder/internal/opensubtitles"
 )
 
@@ -38,9 +39,18 @@ func (u *UI) showSettings() {
 	insecure := widget.NewCheck("Skip TLS certificate verification", nil)
 	insecure.SetChecked(cfg.InsecureTLS)
 
+	// Override for the built-in OpenSubtitles key. Shows only the user's own
+	// value (never the baked-in default); blank means "use the built-in key".
+	// A stored value equal to the default is treated as no override, so the
+	// default can never get stuck showing in the field.
 	subtitlesKey := widget.NewPasswordEntry()
-	subtitlesKey.SetText(cfg.OpenSubtitlesAPIKey)
-	subtitlesKey.SetPlaceHolder("get a free key at " + opensubtitles.RegisterURL)
+	if cfg.OpenSubtitlesAPIKey != opensubtitles.DefaultAPIKey {
+		subtitlesKey.SetText(cfg.OpenSubtitlesAPIKey)
+	}
+	subtitlesKey.SetPlaceHolder("leave blank to use the built-in key")
+
+	delfanLoginHost := entryWith(cfg.DelfanLoginHost, delfan.DefaultLoginHost+" (default)")
+	delfanAPIHost := entryWith(cfg.DelfanAPIHost, delfan.DefaultAPIHost+" (default)")
 
 	// collect turns the current field values into a Config.
 	collect := func() config.Config {
@@ -54,7 +64,15 @@ func (u *UI) showSettings() {
 		next.Country = strings.TrimSpace(country.Text)
 		next.SP = sp.Checked
 		next.InsecureTLS = insecure.Checked
-		next.OpenSubtitlesAPIKey = strings.TrimSpace(subtitlesKey.Text)
+		// Store the override, but never persist the default itself — an empty
+		// value already means "use the default".
+		if key := strings.TrimSpace(subtitlesKey.Text); key != opensubtitles.DefaultAPIKey {
+			next.OpenSubtitlesAPIKey = key
+		} else {
+			next.OpenSubtitlesAPIKey = ""
+		}
+		next.DelfanLoginHost = strings.TrimSpace(delfanLoginHost.Text)
+		next.DelfanAPIHost = strings.TrimSpace(delfanAPIHost.Text)
 		if n, err := strconv.Atoi(timeout.Text); err == nil && n > 0 {
 			next.TimeoutSeconds = n
 		}
@@ -110,7 +128,9 @@ func (u *UI) showSettings() {
 		{Text: "", Widget: insecure, HintText: "Only needed for https:// hosts, which currently serve a certificate for a different name."},
 		{Text: "Timeout (s)", Widget: timeout},
 		{Text: "", Widget: container.NewVBox(testButton, testResult)},
-		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Needed for the Subtitles button. Free account + \"consumer\" app at " + opensubtitles.RegisterURL},
+		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Optional — overrides the built-in key. Get your own at " + opensubtitles.RegisterURL},
+		{Text: "Delfan login host", Widget: delfanLoginHost, HintText: "Leave blank for the default. Change if the Delfan source stops working."},
+		{Text: "Delfan API host", Widget: delfanAPIHost},
 	}
 
 	d := dialog.NewForm("Settings", "Save", "Cancel", form, func(ok bool) {
@@ -129,7 +149,8 @@ func (u *UI) showSettings() {
 
 		u.cfg = next
 		u.client = api.New(next)
-		u.subtitles = opensubtitles.New(next.OpenSubtitlesAPIKey)
+		u.delfan = delfan.New(next.DelfanLoginHost, next.DelfanAPIHost)
+		u.subtitles = opensubtitles.New(opensubtitles.ResolveKey(next.OpenSubtitlesAPIKey))
 		u.setStatus("Settings saved.")
 		u.reload(1)
 	}, u.window)

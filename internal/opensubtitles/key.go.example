@@ -1,0 +1,13 @@
+package opensubtitles
+
+// Template for the built-in OpenSubtitles API key.
+//
+// Copy this file to key.go (same directory) and fill in the key. key.go is
+// gitignored, so the secret is compiled into the binary but never committed.
+// Leaving key.go absent is fine — the app then ships with no built-in key and
+// each user provides their own in Settings.
+//
+// Get a key at https://www.opensubtitles.com/en/consumers
+func init() {
+	DefaultAPIKey = "" // <- put the key here in your local key.go
+}
