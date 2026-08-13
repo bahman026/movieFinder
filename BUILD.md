@@ -1,8 +1,10 @@
 # How to build MovieFinder
 
-This guide shows how to build the app for **Windows** and for **Linux (Ubuntu)**.
+This guide shows how to build the app for **Windows**, **Linux (Ubuntu)** and **macOS**.
 
-Everything is built inside **Docker**, so you do **not** need to install Go or any C compiler on your computer. You only need Docker.
+The Windows and Linux builds run inside **Docker**, so for those you do **not** need to install Go or any C compiler. You only need Docker.
+
+**macOS is the exception.** A Mac app must be built on a Mac, with Go installed — Docker cannot produce one. The graphics toolkit draws through Apple's Cocoa frameworks, and those come only from the macOS SDK on a real Mac, so no Linux container can compile them. See [section 4](#4-build-for-macos).
 
 ---
 
@@ -10,7 +12,9 @@ Everything is built inside **Docker**, so you do **not** need to install Go or a
 
 Do these once.
 
-### a) Install Docker
+### a) Install Docker — *Windows and Linux only*
+
+Building **only** for macOS? Skip this and do step **1f** instead.
 
 - **Windows:** install **Docker Desktop** from <https://www.docker.com/products/docker-desktop/>. Open it and wait until it says *Running*.
 - **Ubuntu:** install Docker Engine:
@@ -54,6 +58,23 @@ Some networks block the default Go module server. If the build fails while downl
 --build-arg GOPROXY=https://proxy.golang.org,direct
 ```
 (The project already defaults to a mirror that works in most places, so usually you don't need this.)
+
+### f) (macOS only) Install Go and Apple's build tools
+
+The Mac build compiles on your machine instead of in a container, so it needs two things:
+
+```bash
+xcode-select --install     # Apple's compiler and the macOS SDK (skip if already installed)
+brew install go            # the Go toolchain
+```
+
+If you don't have Homebrew, get it from <https://brew.sh>, or install Go from <https://go.dev/dl/>.
+
+Check both are ready:
+```bash
+go version
+xcode-select -p
+```
 
 ---
 
@@ -110,20 +131,93 @@ chmod +x dist/MovieFinder     # once, to make it runnable
 
 ---
 
-## 4. Where the files go
+## 4. Build for macOS
 
-Both builds put their result in the `dist/` folder:
+You get **`dist/MovieFinder.app`** — a normal Mac app with its own icon, which you can drag into your Applications folder.
 
-| Build | Command | Output |
-| --- | --- | --- |
-| Windows | `.\build.ps1` | `dist\MovieFinder.exe` |
-| Linux | `.\build-linux.ps1` | `dist/MovieFinder` |
+> **This build does not use Docker.** It runs on your Mac directly, so make sure you did step **1f** first.
 
-You can copy that one file to another computer of the same type and run it — nothing else needs to be installed.
+**Easy way:**
+```bash
+./build-mac.sh
+```
+
+**Manual way** (the same two steps the script runs):
+```bash
+# 1. Compile the program
+CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+    go build -trimpath -ldflags "-s -w" -o dist/MovieFinder ./cmd/moviefinder
+
+# 2. Wrap it in a .app bundle, so it gets its icon and its name in the Dock
+go run fyne.io/tools/cmd/fyne@latest package \
+    -os darwin --exe dist/MovieFinder --icon Icon.png \
+    --name MovieFinder --app-id com.moviefinder.app
+mv MovieFinder.app dist/
+```
+
+To run it:
+```bash
+open dist/MovieFinder.app
+```
+
+### Which chip to build for
+
+- **Apple silicon** (M1 and newer) — `arm64`. This is the default.
+- **Intel Mac** — `amd64`.
+
+```bash
+./build-mac.sh amd64          # or set GOARCH=amd64 in the manual command
+```
+
+A Mac app built for `arm64` will not run on an Intel Mac. The other direction works, because Apple silicon can run Intel apps through Rosetta.
+
+### Careful: the packaging step edits a project file
+
+`fyne package` **rewrites `FyneApp.toml`** while it runs — it bumps the `Build` number and removes empty fields. `build-mac.sh` restores the file for you. If you run the manual command instead, put it back yourself so the change doesn't sneak into a commit:
+
+```bash
+git checkout -- FyneApp.toml
+```
+
+### Opening the app on a different Mac
+
+The app is not signed with an Apple developer certificate. On the Mac that built it, it just opens. Copy it to **another** Mac and macOS will quarantine it and refuse to start it (*"Apple could not verify..."*). On that Mac, either:
+
+- right-click the app → **Open** → **Open** (only needed the first time), or
+- clear the quarantine flag:
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/MovieFinder.app
+  ```
+
+### Playing videos needs a separate player
+
+MovieFinder has no built-in video decoder — it hands the stream to a player already on your Mac. Install one:
+
+```bash
+brew install --cask vlc       # or:  brew install mpv       or:  brew install --cask iina
+```
+
+MovieFinder looks for VLC, mpv and IINA in their usual install locations. If yours is somewhere unusual, type the full path in **Settings → Video player**.
+
+> Why full paths and not just "whatever is on my PATH"? An app started from Finder does not inherit the `PATH` from your terminal, so a player that works when you type its name in a shell can still be invisible to the app. That's why the standard locations are checked directly.
 
 ---
 
-## 5. Common problems
+## 5. Where the files go
+
+Every build puts its result in the `dist/` folder:
+
+| Build | Command | Output | Built with |
+| --- | --- | --- | --- |
+| Windows | `.\build.ps1` | `dist\MovieFinder.exe` | Docker |
+| Linux | `.\build-linux.ps1` | `dist/MovieFinder` | Docker |
+| macOS | `./build-mac.sh` | `dist/MovieFinder.app` | Go on the Mac itself |
+
+You can copy that one file (or, on macOS, the one `.app` folder) to another computer of the same type and run it — nothing else needs to be installed.
+
+---
+
+## 6. Common problems
 
 | Message | Fix |
 | --- | --- |
@@ -131,10 +225,15 @@ You can copy that one file to another computer of the same type and run it — n
 | `certificate signed by unknown authority` | See step **1d** above. |
 | `this service is not available in your location` | See step **1e** above. |
 | Subtitle search says "add your API key" | Either add the built-in key (step **1c**) or type your own key in the app's Settings. |
+| macOS: `go: command not found` | Go isn't installed — see step **1f**. |
+| macOS: build stops on a missing header or SDK | Apple's tools are missing: `xcode-select --install` (step **1f**). |
+| macOS: *"Apple could not verify..."* when opening | Expected for an unsigned app copied from another Mac — see [section 4](#opening-the-app-on-a-different-mac). |
+| macOS: `FyneApp.toml` shows up as changed in git | The packaging step rewrote it. `git checkout -- FyneApp.toml`, and prefer `./build-mac.sh`, which restores it automatically. |
+| "No video player found" | Install VLC, mpv or IINA, or set the player path in **Settings** — see the end of [section 4](#4-build-for-macos). |
 
 ---
 
-## 6. Running the tests (optional)
+## 7. Running the tests (optional)
 
 If you want to check the code before building:
 
@@ -144,4 +243,10 @@ docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefin
     go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/delfan/... ./internal/player/... ./internal/stream/...
 ```
 
-(The user-interface package is left out here because it only compiles as part of the full Windows or Linux build above.)
+**On a Mac**, once step **1f** is done you can run them directly — no Docker needed:
+
+```bash
+go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/delfan/... ./internal/player/... ./internal/stream/...
+```
+
+(The user-interface package is left out here because its tests need a real screen. It still gets compiled as part of any of the three builds above, which is what catches mistakes in it.)

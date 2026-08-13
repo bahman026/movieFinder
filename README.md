@@ -18,7 +18,9 @@ The result is a single self-contained `dist\MovieFinder.exe` — no runtime, no 
 
 The first build downloads the Go image and the mingw cross-compiler (a few minutes). Later builds reuse the layer cache. The build also emits `dist\go.sum`; `build.ps1` moves it into the repo root so dependency versions stay pinned from then on.
 
-See **[BUILD.md](BUILD.md)** for step-by-step build instructions (Windows and Linux), including prerequisites.
+Linux and macOS builds are also supported: `.\build-linux.ps1` (Docker) and `./build-mac.sh` (native — a Mac app needs Cocoa from the macOS SDK, which Docker cannot cross-compile).
+
+See **[BUILD.md](BUILD.md)** for step-by-step build instructions (Windows, Linux and macOS), including prerequisites.
 
 ### Built-in subtitle key
 
@@ -157,5 +159,7 @@ internal/ui/subtitles.go           subtitle search dialog and download
 internal/ui/settings.go            settings dialog and per-host connection test
 Dockerfile                         mingw cross-compile to a Windows .exe
 build.ps1                          one-command build wrapper
+build-linux.ps1                    same, for the Linux target
+build-mac.sh                       native macOS build + .app packaging (no Docker)
 export-proxy-ca.ps1                exports the local TLS-interception CA for the build
 ```
