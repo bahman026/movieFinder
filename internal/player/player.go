@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -15,9 +16,10 @@ import (
 type argStyle int
 
 const (
-	styleSubFile argStyle = iota // --sub-file=PATH  (mpv, VLC)
-	stylePotSub                  // /sub=PATH        (PotPlayer)
-	styleMpcSub                  // /sub PATH        (MPC-HC)
+	styleSubFile argStyle = iota // --sub-file=PATH      (mpv, VLC)
+	stylePotSub                  // /sub=PATH            (PotPlayer)
+	styleMpcSub                  // /sub PATH            (MPC-HC)
+	styleIINASub                 // --mpv-sub-file=PATH  (IINA, via iina-cli)
 )
 
 // Player is a launchable external player.
@@ -38,7 +40,15 @@ type candidate struct {
 
 // candidates are probed in order — the first found wins. PotPlayer is first
 // because it is what is installed here; order otherwise favours the players
-// that handle the widest range of codecs out of the box.
+// that handle the widest range of codecs out of the box. Locations for every
+// OS live in one list: a path that does not exist simply fails its stat, so
+// there is nothing to gain from splitting this per platform.
+//
+// The absolute macOS paths are not redundant with exeNames. A bundled .app
+// launched from Finder inherits a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+// rather than the shell's, so exec.LookPath("mpv") misses a Homebrew install
+// that works fine from a terminal. Probing the Homebrew prefixes directly is
+// what makes detection work in the packaged app.
 var candidates = []candidate{
 	{
 		name:  "PotPlayer",
@@ -54,6 +64,10 @@ var candidates = []candidate{
 		exeNames: []string{"mpv", "mpv.exe"},
 		paths: []string{
 			`C:\Program Files\mpv\mpv.exe`,
+			"/opt/homebrew/bin/mpv", // Homebrew, Apple silicon
+			"/usr/local/bin/mpv",    // Homebrew, Intel
+			"/Applications/mpv.app/Contents/MacOS/mpv",
+			"~/Applications/mpv.app/Contents/MacOS/mpv",
 		},
 	},
 	{
@@ -68,6 +82,20 @@ var candidates = []candidate{
 		paths: []string{
 			`C:\Program Files\VideoLAN\VLC\vlc.exe`,
 			`C:\Program Files (x86)\VideoLAN\VLC\vlc.exe`,
+			// The .app bundle ships no `vlc` on PATH, so this is the only way
+			// a normal macOS VLC install is found.
+			"/Applications/VLC.app/Contents/MacOS/VLC",
+			"~/Applications/VLC.app/Contents/MacOS/VLC",
+		},
+	},
+	{
+		name:  "IINA",
+		style: styleIINASub,
+		// iina-cli, not the GUI binary beside it: the bundle's IINA executable
+		// ignores command-line arguments, so the helper is what accepts a URL.
+		paths: []string{
+			"/Applications/IINA.app/Contents/MacOS/iina-cli",
+			"~/Applications/IINA.app/Contents/MacOS/iina-cli",
 		},
 	},
 	{
@@ -99,12 +127,27 @@ func Detect(configuredPath string) (Player, error) {
 			}
 		}
 		for _, path := range c.paths {
-			if fileExists(path) {
-				return Player{Name: c.name, Path: path, style: c.style}, nil
+			// Resolved before the stat and carried in Player.Path: a leading ~
+			// means nothing to exec.
+			if full := expandHome(path); fileExists(full) {
+				return Player{Name: c.name, Path: full, style: c.style}, nil
 			}
 		}
 	}
-	return Player{}, fmt.Errorf("no video player found — install mpv, VLC or PotPlayer, or set one in Settings")
+	return Player{}, fmt.Errorf("no video player found — install mpv, VLC, IINA or PotPlayer, or set one in Settings")
+}
+
+// expandHome resolves a leading ~/ so candidates can name per-user install
+// locations such as ~/Applications.
+func expandHome(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // Play launches the player on videoURL. When subtitlePath is non-empty it is
@@ -117,14 +160,7 @@ func (p Player) Play(videoURL, subtitlePath string) error {
 
 	args := []string{videoURL}
 	if strings.TrimSpace(subtitlePath) != "" {
-		switch p.style {
-		case stylePotSub:
-			args = append(args, "/sub="+subtitlePath)
-		case styleMpcSub:
-			args = append(args, "/sub", subtitlePath)
-		default: // styleSubFile
-			args = append(args, "--sub-file="+subtitlePath)
-		}
+		args = append(args, subtitleArg(p.style, subtitlePath)...)
 	}
 
 	cmd := exec.Command(p.Path, args...)
@@ -134,6 +170,22 @@ func (p Player) Play(videoURL, subtitlePath string) error {
 	// Do not Wait — the player owns its lifetime from here.
 	go func() { _ = cmd.Wait() }() // reap so it does not linger as a zombie
 	return nil
+}
+
+// subtitleArg is each player's own flag syntax for an external subtitle file.
+// Play uses it rather than an inline switch so the test exercises the real
+// mapping instead of a copy of it.
+func subtitleArg(style argStyle, sub string) []string {
+	switch style {
+	case stylePotSub:
+		return []string{"/sub=" + sub}
+	case styleMpcSub:
+		return []string{"/sub", sub}
+	case styleIINASub:
+		return []string{"--mpv-sub-file=" + sub}
+	default: // styleSubFile
+		return []string{"--sub-file=" + sub}
+	}
 }
 
 func fileExists(path string) bool {
@@ -154,6 +206,8 @@ func playerNameFromPath(path string) string {
 		return "VLC"
 	case strings.Contains(lower, "mpc-hc"):
 		return "MPC-HC"
+	case strings.Contains(lower, "iina"):
+		return "IINA"
 	}
 	return "player"
 }
@@ -165,6 +219,8 @@ func styleFromPath(path string) argStyle {
 		return stylePotSub
 	case strings.Contains(lower, "mpc-hc"):
 		return styleMpcSub
+	case strings.Contains(lower, "iina"):
+		return styleIINASub
 	default:
 		return styleSubFile
 	}
