@@ -137,7 +137,15 @@ func (u *UI) showSettings() {
 		{Text: "Video player", Widget: playerPath, HintText: "Path to a player exe, or blank to auto-detect. Play passes the stream and subtitle to it."},
 	}
 
-	d := dialog.NewForm("Settings", "Save", "Cancel", form, func(ok bool) {
+	// A plain form inside a scroller rather than dialog.NewForm: the form dialog
+	// does not scroll its content, so as soon as the fields are taller than the
+	// dialog the Save/Cancel row is drawn over the last input instead of below
+	// it. There are enough fields here that this happens at any reasonable
+	// dialog height, and macOS's larger text metrics make it worse. Scrolling
+	// the fields keeps the buttons clear of them at every size.
+	content := container.NewVScroll(widget.NewForm(form...))
+
+	d := dialog.NewCustomConfirm("Settings", "Save", "Cancel", content, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -159,7 +167,13 @@ func (u *UI) showSettings() {
 		u.reload(1)
 	}, u.window)
 
-	d.Resize(fyne.NewSize(660, 600))
+	// Clamp to the window: a fixed 600 is taller than a laptop screen once the
+	// window itself is small, which would push the buttons out of reach.
+	win := u.window.Canvas().Size()
+	d.Resize(fyne.NewSize(
+		fyne.Min(660, win.Width-40),
+		fyne.Min(600, win.Height-40),
+	))
 	d.Show()
 }
 

@@ -725,12 +725,22 @@ func (u *UI) linkRow(link api.DownloadLink) fyne.CanvasObject {
 	label := widget.NewLabel(link.Describe())
 	label.TextStyle = fyne.TextStyle{Bold: true}
 
-	// A disabled entry rather than a label, so the URL stays selectable for
-	// copying by hand while being uneditable.
+	// An entry rather than a label, so the URL stays selectable for copying by
+	// hand and a long one scrolls inside the row instead of widening it.
+	//
+	// Kept enabled — not Disable()d — for the same reason as u.info in
+	// buildDetailPane: the disabled colour is ~1.4:1 against the input
+	// background in the dark theme and ~1.15:1 in the light one, which renders
+	// the URL invisible. Edits are reverted, so it still behaves as read-only.
+	url := link.URL
 	field := widget.NewEntry()
-	field.SetText(link.URL)
+	field.SetText(url)
 	field.Wrapping = fyne.TextWrapOff
-	field.Disable()
+	field.OnChanged = func(s string) {
+		if s != url {
+			field.SetText(url) // read-only: undo any typing
+		}
+	}
 
 	playButton := widget.NewButtonWithIcon("Play", theme.MediaPlayIcon(), func() {
 		u.playLink(link.URL, link.Describe())
