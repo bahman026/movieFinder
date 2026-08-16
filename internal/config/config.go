@@ -62,7 +62,7 @@ func Default() Config {
 			"http://mjapiservers.com",
 		},
 		BasePath:       "/playstore/api",
-		APISecretKey:   "1661e8b60126d9f9",
+		APISecretKey:   "343hg4343",
 		Version:        "4.5.0",
 		Country:        "other",
 		SP:             true,

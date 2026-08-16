@@ -53,4 +53,23 @@ go run fyne.io/tools/cmd/fyne@latest package \
 
 mv MovieFinder.app dist/
 
+# Re-sign the finished bundle. The linker ad-hoc signs the bare executable, but
+# that signature does not cover the .app wrapper around it, so `codesign -v`
+# reports "code has no resources but signature indicates they must be present".
+# macOS requires a valid signature on Apple silicon, so an invalid one is not a
+# warning — the app is rejected outright as "damaged and can't be opened", which
+# only shows up once someone else opens it. Ad-hoc (-s -) is enough to make the
+# bundle internally consistent; it is not an Apple Developer ID, so Gatekeeper
+# still asks the user to approve the app the first time.
+codesign --force --deep -s - dist/MovieFinder.app
+codesign --verify --strict dist/MovieFinder.app
+
+# A .app is a directory, so it cannot be attached to a chat app or emailed as
+# is. ditto (not zip) is what preserves bundle symlinks and metadata, and keeps
+# the signature valid through the round trip.
+zip="MovieFinder-mac-$goarch.zip"
+rm -f "dist/$zip"
+(cd dist && ditto -c -k --sequesterRsrc --keepParent MovieFinder.app "$zip")
+
 echo "Done: dist/MovieFinder.app ($(du -sh dist/MovieFinder.app | cut -f1)), a macOS $goarch app"
+echo "To share: dist/$zip ($(du -sh "dist/$zip" | cut -f1))"
