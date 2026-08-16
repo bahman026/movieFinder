@@ -229,9 +229,17 @@ func (u *UI) startDownloadAndPlay(p player.Player, remoteURL, linkLabel string, 
 			u.activeStream.Stop()
 		}
 
+		// Playback wins the one connection: suspend the queue before opening
+		// this one, and hand it back in finishDownload/cancelDownload. Only the
+		// saving path does this — launchDirect streams from the player's own
+		// process, whose lifetime this app cannot observe, so there would be no
+		// reliable moment to release the queue again.
+		u.downloads.Hold()
+
 		srv := stream.New(remoteURL, savePath)
 		local, err := srv.Start(context.Background())
 		if err != nil {
+			u.downloads.Release()
 			dialog.ShowError(err, u.window)
 			return
 		}
@@ -240,6 +248,7 @@ func (u *UI) startDownloadAndPlay(p player.Player, remoteURL, linkLabel string, 
 		if err := p.Play(local, subPath); err != nil {
 			srv.Stop()
 			u.activeStream = nil
+			u.downloads.Release()
 			dialog.ShowError(err, u.window)
 			return
 		}
@@ -329,6 +338,7 @@ func (u *UI) cancelDownload() {
 	u.activeStream.Stop()
 	u.activeStream = nil
 	u.hideDownloadControls()
+	u.downloads.Release() // the queue may use the connection again
 	u.setStatus("Download canceled.")
 }
 
@@ -346,6 +356,7 @@ func (u *UI) finishDownload(srv *stream.Server) {
 		u.activeStream = nil
 	}
 	u.hideDownloadControls()
+	u.downloads.Release() // the queue may use the connection again
 }
 
 func (u *UI) closePlayDialog() {

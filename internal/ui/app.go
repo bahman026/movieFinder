@@ -15,12 +15,14 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"moviefinder/internal/api"
 	"moviefinder/internal/config"
 	"moviefinder/internal/delfan"
+	"moviefinder/internal/download"
 	"moviefinder/internal/opensubtitles"
 	"moviefinder/internal/stream"
 )
@@ -115,29 +117,65 @@ type UI struct {
 	cancelLoad   context.CancelFunc
 	cancelDetail context.CancelFunc
 
+	// The window shows one of two pages at a time: the poster grid, or a single
+	// title. Browsing gets the full width for posters, and a title gets the
+	// full width for its description and links, instead of both being squeezed
+	// into one half of a split.
+	browsePage *fyne.Container
+	detailPage *fyne.Container
+	pagerBox   *fyne.Container // hidden on the detail page, where it means nothing
+
 	grid         *widget.GridWrap
 	sourceSelect *widget.Select
 	search       *widget.Entry
-	status      *widget.Label
-	hostLabel   *widget.Label
-	loadingBar  *widget.ProgressBarInfinite
-	info        *widget.Entry
-	infoText    string // the intended details text, so edits can be reverted
-	imdbLink    *widget.Hyperlink
-	detailImage *canvas.Image
-	detailWant  string // the poster URL the detail pane currently expects
-	linkBox     *fyne.Container
-	pageLabel   *widget.Label
-	prevButton  *widget.Button
-	nextButton  *widget.Button
-	playDialog  dialog.Dialog
-	dlControls  *fyne.Container
-	pauseButton *widget.Button
-	cancelBtn   *widget.Button
+	status       *widget.Label
+	hostLabel    *widget.Label
+	loadingBar   *widget.ProgressBarInfinite
+	info         *widget.Entry
+	infoText     string // the intended details text, so edits can be reverted
+	imdbLink     *widget.Hyperlink
+	// Detail header: the title block and the metadata chips beside the poster.
+	detailTitle    *widget.Label
+	detailSubtitle *widget.Label
+	detailChips    *fyne.Container
+	detailImage    *canvas.Image
+	detailWant     string // the poster URL the detail pane currently expects
+	linkBox        *fyne.Container
+	linksHeader    *widget.Label
+	pageLabel      *widget.Label
+	prevButton     *widget.Button
+	nextButton     *widget.Button
+	playDialog     dialog.Dialog
+	dlControls     *fyne.Container
+	pauseButton    *widget.Button
+	cancelBtn      *widget.Button
+
+	// downloads is the sequential save-to-disk queue behind the per-link
+	// Download buttons. It runs one transfer at a time and yields to playback,
+	// so the app never holds more than one upstream connection.
+	downloads       *download.Queue
+	downloadsButton *widget.Button
+	downloadsBox    *fyne.Container // rows, populated only while the dialog is open
+	downloadsDialog dialog.Dialog
 
 	// activeStream is the current download-while-playing server, if any. A new
 	// playback stops the previous one.
 	activeStream *stream.Server
+}
+
+// delfanOptions maps the saved settings onto the Database 2 client's endpoint
+// shape. It lives here rather than on config.Config so that config stays the
+// bottom layer and does not have to import a client package.
+func delfanOptions(cfg config.Config) delfan.Options {
+	return delfan.Options{
+		LoginHost:     cfg.DelfanLoginHost,
+		APIHost:       cfg.DelfanAPIHost,
+		BasePath:      cfg.DelfanBasePath,
+		LoginEndpoint: cfg.DelfanLoginEndpoint,
+		APIEndpoint:   cfg.DelfanAPIEndpoint,
+		APIKey:        cfg.DelfanAPIKey,
+		AppVersion:    cfg.DelfanAppVersion,
+	}
 }
 
 // Run builds the window and blocks until it is closed.
@@ -145,6 +183,7 @@ func Run() {
 	cfg, err := config.Load()
 
 	a := fyneapp.NewWithID(appID)
+	a.Settings().SetTheme(movieTheme{})
 	a.SetIcon(appIcon)
 	w := a.NewWindow("MovieFinder")
 	w.SetIcon(appIcon)
@@ -155,7 +194,7 @@ func Run() {
 		window:    w,
 		cfg:       cfg,
 		client:    api.New(cfg),
-		delfan:    delfan.New(cfg.DelfanLoginHost, cfg.DelfanAPIHost),
+		delfan:    delfan.NewWithOptions(delfanOptions(cfg)),
 		subtitles: opensubtitles.New(opensubtitles.ResolveKey(cfg.OpenSubtitlesAPIKey)),
 		images:    newImageCache(),
 		source:    sourceMovieFinder,
@@ -163,8 +202,24 @@ func Run() {
 		page:      1,
 		selected:  -1,
 	}
+	// Built before the content, since the widgets reference it. onChange runs on
+	// the queue's worker goroutine, so it hops to the UI thread before touching
+	// any widget.
+	u.downloads = download.New(func() {
+		fyne.Do(u.refreshDownloads)
+	})
+
 	w.SetContent(u.build())
 	w.SetMaster()
+
+	// Cancel every transfer on the way out; otherwise a queued download would
+	// keep running with no window to report it.
+	w.SetOnClosed(func() {
+		u.downloads.StopAll()
+		if u.activeStream != nil {
+			u.activeStream.Stop()
+		}
+	})
 
 	if err != nil {
 		u.setStatus("Could not read settings: " + err.Error())
@@ -192,6 +247,10 @@ func (u *UI) build() fyne.CanvasObject {
 	})
 	settingsButton := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
 		u.showSettings()
+	})
+	// Label carries the live count, so the queue is visible without opening it.
+	u.downloadsButton = widget.NewButtonWithIcon("", theme.DownloadIcon(), func() {
+		u.showDownloads()
 	})
 
 	// Callback attached below, after the widgets it drives exist; SetSelected
@@ -229,7 +288,7 @@ func (u *UI) build() fyne.CanvasObject {
 		container.NewHBox(searchButton, clearButton), u.search)
 	toolbar := container.NewBorder(nil, nil,
 		container.NewHBox(sourceSelect, sortSelect, refreshButton),
-		settingsButton,
+		container.NewHBox(u.downloadsButton, settingsButton),
 		searchBox,
 	)
 
@@ -239,16 +298,31 @@ func (u *UI) build() fyne.CanvasObject {
 	top := container.NewVBox(container.NewPadded(toolbar), u.loadingBar, widget.NewSeparator())
 
 	u.grid = u.buildGrid()
-	split := container.NewHSplit(u.grid, u.buildDetailPane())
-	split.Offset = 0.63
+
+	// Page one: the toolbar over a full-width grid.
+	u.browsePage = container.NewBorder(top, nil, nil, nil, u.grid)
+
+	// Page two: a back bar over the whole title. Built here so the widgets it
+	// owns exist before any callback below can reach for them.
+	back := widget.NewButtonWithIcon("Back to results", theme.NavigateBackIcon(), func() {
+		u.showBrowse()
+	})
+	backBar := container.NewVBox(
+		container.NewPadded(container.NewHBox(back)),
+		widget.NewSeparator(),
+	)
+	u.detailPage = container.NewBorder(backBar, nil, nil, nil, u.buildDetailPane())
+	u.detailPage.Hide()
 
 	// Now that the grid and detail pane exist, wiring the pickers is safe.
 	sourceSelect.OnChanged = func(name string) {
 		u.mu.Lock()
 		u.source = name
-		u.query = ""
 		u.mu.Unlock()
-		u.search.SetText("")
+		// The search term is kept on purpose: switching source almost always
+		// means "look for the same thing in the other database", and clearing
+		// the box forced the user to retype it every time. reload re-runs the
+		// current query against the new source.
 		u.reload(1)
 	}
 	sortSelect.OnChanged = func(mode string) {
@@ -277,7 +351,7 @@ func (u *UI) build() fyne.CanvasObject {
 		u.reload(u.currentPage() + 1)
 	})
 	u.prevButton.Disable()
-	pager := container.NewHBox(u.prevButton, u.pageLabel, u.nextButton)
+	u.pagerBox = container.NewHBox(u.prevButton, u.pageLabel, u.nextButton)
 
 	// Download controls, shown only while a download-while-playing is active.
 	u.pauseButton = widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), u.togglePause)
@@ -290,12 +364,37 @@ func (u *UI) build() fyne.CanvasObject {
 	// controls + pager on the right. One line keeps it compact.
 	statusBar := container.NewBorder(nil, nil,
 		u.status,
-		container.NewHBox(u.hostLabel, u.dlControls, pager),
+		container.NewHBox(u.hostLabel, u.dlControls, u.pagerBox),
 		nil,
 	)
 	bottom := container.NewVBox(widget.NewSeparator(), statusBar)
 
-	return container.NewBorder(top, bottom, nil, nil, split)
+	// The status bar sits outside the page stack so that feedback from actions
+	// taken on either page — "Copied", "Queued", download progress — is always
+	// visible. Only the pager is page-specific, and it hides itself.
+	pages := container.NewStack(u.browsePage, u.detailPage)
+	return container.NewBorder(nil, bottom, nil, nil, pages)
+}
+
+// showDetail brings the single-title page forward.
+func (u *UI) showDetail() {
+	u.browsePage.Hide()
+	u.detailPage.Show()
+	u.pagerBox.Hide()
+}
+
+// showBrowse returns to the grid. The selection is dropped so that clicking the
+// same poster again re-opens it — GridWrap will not re-fire OnSelected for a
+// row that is already selected.
+func (u *UI) showBrowse() {
+	u.detailPage.Hide()
+	u.browsePage.Show()
+	u.pagerBox.Show()
+
+	u.grid.UnselectAll()
+	u.mu.Lock()
+	u.selected = -1
+	u.mu.Unlock()
 }
 
 func (u *UI) buildGrid() *widget.GridWrap {
@@ -323,6 +422,7 @@ func (u *UI) buildGrid() *widget.GridWrap {
 		u.selected = int(id)
 		u.mu.Unlock()
 		u.loadDetail(int(id))
+		u.showDetail()
 	}
 	return grid
 }
@@ -369,7 +469,22 @@ func (u *UI) buildDetailPane() fyne.CanvasObject {
 	// Poster shown alongside the details, beside the action buttons.
 	u.detailImage = canvas.NewImageFromResource(theme.BrokenImageIcon())
 	u.detailImage.FillMode = canvas.ImageFillContain
-	u.detailImage.SetMinSize(fyne.NewSize(120, 180))
+	u.detailImage.SetMinSize(fyne.NewSize(190, 285))
+
+	// Title block: the title, the localized title under it in grey, then the
+	// facts as chips — the shape the reference detail pages use, instead of the
+	// "Label: value" list this pane used to lead with.
+	u.detailTitle = widget.NewLabel("Select a title")
+	u.detailTitle.TextStyle = fyne.TextStyle{Bold: true}
+	u.detailTitle.SizeName = theme.SizeNameSubHeadingText
+	u.detailTitle.Wrapping = fyne.TextWrapWord
+
+	u.detailSubtitle = widget.NewLabel("")
+	u.detailSubtitle.Importance = widget.LowImportance
+	u.detailSubtitle.Wrapping = fyne.TextWrapWord
+	u.detailSubtitle.Hide()
+
+	u.detailChips = container.NewHBox()
 
 	copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
 		if text := strings.TrimSpace(u.info.Text); text != "" {
@@ -384,20 +499,122 @@ func (u *UI) buildDetailPane() fyne.CanvasObject {
 
 	u.linkBox = container.NewVBox()
 
-	// The poster on the left; the actions and IMDb link stacked to its right.
-	actions := container.NewVBox(
-		widget.NewLabelWithStyle("Details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(copyButton, subtitlesButton),
-		u.imdbLink,
+	// Poster on the left, title block and actions stacked to its right. The
+	// poster keeps its intrinsic size while the text column takes the rest, so
+	// a long title wraps instead of squeezing the artwork.
+	titleBlock := container.NewVBox(
+		// Same tightening as the poster caption: the localized title belongs to
+		// the line above it, not floating between it and the chips.
+		container.New(layout.NewCustomPaddedVBoxLayout(-13), u.detailTitle, u.detailSubtitle),
+		u.detailChips,
+		container.NewHBox(copyButton, subtitlesButton, u.imdbLink),
 	)
-	header := container.NewHBox(u.detailImage, actions)
+	header := container.NewBorder(nil, nil,
+		container.NewVBox(u.detailImage), nil,
+		container.NewPadded(titleBlock),
+	)
 
-	// A split gives the selectable details and the links their own scrollable
-	// areas, so a long description does not push the links off-screen.
-	body := container.NewVSplit(u.info, container.NewVScroll(u.linkBox))
-	body.Offset = 0.5
+	// Side by side rather than stacked: on a full-width page the description and
+	// the links each get a readable column, and neither scrolls the other off.
+	// Each keeps its own scroll area so a long synopsis cannot bury the links.
+	details := container.NewBorder(
+		container.NewVBox(sectionLabel("Details"), widget.NewSeparator()),
+		nil, nil, nil,
+		u.info,
+	)
+	u.linksHeader = sectionLabel("Downloads")
+	links := container.NewBorder(
+		container.NewVBox(u.linksHeader, widget.NewSeparator()),
+		nil, nil, nil,
+		container.NewVScroll(u.linkBox),
+	)
 
-	return container.NewBorder(container.NewVBox(container.NewPadded(header), widget.NewSeparator()), nil, nil, nil, body)
+	body := container.NewHSplit(details, links)
+	body.Offset = 0.45
+
+	return container.NewBorder(
+		container.NewVBox(container.NewPadded(header), widget.NewSeparator()),
+		nil, nil, nil,
+		container.NewPadded(body),
+	)
+}
+
+// setLinksHeading renames the downloads column, which is where the count of
+// links (or seasons) is shown.
+func (u *UI) setLinksHeading(text string) {
+	if u.linksHeader != nil {
+		u.linksHeader.SetText(text)
+	}
+}
+
+// sectionLabel is the small heading that names a block on the detail page.
+func sectionLabel(text string) *widget.Label {
+	l := widget.NewLabel(text)
+	l.TextStyle = fyne.TextStyle{Bold: true}
+	return l
+}
+
+// setDetailHeader fills the title block above the details text. The facts that
+// become chips here are left out of renderDetail, so nothing is stated twice.
+func (u *UI) setDetailHeader(d api.Detail) {
+	title := strings.TrimSpace(d.Title)
+	if title == "" {
+		title = "Untitled"
+	}
+	u.detailTitle.SetText(title)
+
+	if sub := strings.TrimSpace(d.Writer); sub != "" && sub != title {
+		u.detailSubtitle.SetText(sub)
+		u.detailSubtitle.Show()
+	} else {
+		u.detailSubtitle.SetText("")
+		u.detailSubtitle.Hide()
+	}
+
+	u.detailChips.RemoveAll()
+	// The rating leads in the accent colour, the way these sites badge IMDb.
+	if r := strings.TrimSpace(d.IMDBRating); r != "" && r != "0" {
+		u.detailChips.Add(accentChip("IMDb " + r))
+	}
+	for _, text := range []string{d.Year(), strings.TrimSpace(d.Runtime), strings.TrimSpace(d.VideoQuality)} {
+		if text != "" {
+			u.detailChips.Add(chip(text))
+		}
+	}
+	u.detailChips.Refresh()
+}
+
+// clearDetailHeader resets the title block to its empty state.
+func (u *UI) clearDetailHeader(message string) {
+	u.detailTitle.SetText(message)
+	u.detailSubtitle.SetText("")
+	u.detailSubtitle.Hide()
+	u.detailChips.RemoveAll()
+	u.detailChips.Refresh()
+}
+
+// chip is a small rounded pill for one fact — year, runtime, quality.
+func chip(text string) fyne.CanvasObject {
+	rect := canvas.NewRectangle(colorSurface)
+	rect.CornerRadius = 8
+	rect.StrokeColor = colorLine
+	rect.StrokeWidth = 1
+
+	label := canvas.NewText(text, colorMuted)
+	label.TextSize = 12
+	return container.NewStack(rect, container.NewPadded(label))
+}
+
+// accentChip is the same pill in the accent colour, for the one fact that
+// should catch the eye first.
+func accentChip(text string) fyne.CanvasObject {
+	rect := canvas.NewRectangle(colorAccent)
+	rect.CornerRadius = 8
+
+	label := canvas.NewText(text, colorOnAccent)
+	label.TextSize = 12
+	label.TextStyle = fyne.TextStyle{Bold: true}
+	return container.NewStack(rect, container.NewPadded(label))
 }
 
 // setDetailPoster loads the first non-empty URL into the detail poster,
@@ -615,6 +832,7 @@ func (u *UI) loadDetail(index int) {
 			u.subTitle, u.subIMDB, u.subYear = sub.title, sub.imdb, sub.year
 			u.mu.Unlock()
 
+			u.setDetailHeader(detail)
 			u.setInfo(renderDetail(detail))
 			if link := imdbLink(detail.IMDBID); link != "" {
 				u.imdbLink.SetText("View on IMDb")
@@ -674,13 +892,15 @@ func (u *UI) showLinks(links []api.DownloadLink) {
 	u.linkBox.RemoveAll()
 
 	if len(links) == 0 {
+		u.setLinksHeading("Downloads")
 		u.linkBox.Add(widget.NewLabel("No links for this title."))
 		u.linkBox.Refresh()
 		return
 	}
 
-	u.linkBox.Add(widget.NewLabelWithStyle(
-		fmt.Sprintf("Links (%d)", len(links)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+	// The count goes in the column's own heading rather than on a second line
+	// inside it, so the page does not label this list twice.
+	u.setLinksHeading(fmt.Sprintf("Downloads (%d)", len(links)))
 	for _, link := range links {
 		u.linkBox.Add(u.linkRow(link))
 	}
@@ -710,8 +930,7 @@ func (u *UI) showSeasons(seasons []api.Season) {
 	seasonSelect := widget.NewSelect(names, nil)
 	seasonSelect.OnChanged = func(string) { render(seasonSelect.SelectedIndex()) }
 
-	u.linkBox.Add(widget.NewLabelWithStyle(
-		fmt.Sprintf("Series — %d season/version(s)", len(seasons)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+	u.setLinksHeading(fmt.Sprintf("Downloads — %d season/version(s)", len(seasons)))
 	u.linkBox.Add(container.NewBorder(nil, nil, widget.NewLabel("Season:"), nil, seasonSelect))
 	u.linkBox.Add(widget.NewSeparator())
 	u.linkBox.Add(episodes)
@@ -746,30 +965,33 @@ func (u *UI) linkRow(link api.DownloadLink) fyne.CanvasObject {
 		u.playLink(link.URL, link.Describe())
 	})
 	playButton.Importance = widget.HighImportance
+	// Save without playing. Several of these stack up in the queue and run one
+	// after another, which is how a whole season gets downloaded.
+	downloadButton := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), func() {
+		u.queueDownload(link)
+	})
 	copyButton := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
 		u.window.Clipboard().SetContent(link.URL)
 		u.setStatus("Copied: " + link.Describe())
 	})
 
 	return container.NewVBox(
-		container.NewBorder(nil, nil, nil, container.NewHBox(playButton, copyButton), label),
+		container.NewBorder(nil, nil, nil,
+			container.NewHBox(playButton, downloadButton, copyButton), label),
 		field,
 		widget.NewSeparator(),
 	)
 }
 
 // renderDetail builds the plain-text details shown in the selectable box.
+//
+// The title, localized title, rating, year, runtime and quality are deliberately
+// absent: setDetailHeader shows them above as a heading and chips, and repeating
+// them here would make the reader's eye do the same work twice. What is left is
+// what does not fit in a chip.
 func renderDetail(d api.Detail) string {
 	var b strings.Builder
-	b.WriteString(d.Title + "\n\n")
-	if d.Writer != "" {
-		b.WriteString(d.Writer + "\n\n")
-	}
 
-	writeField(&b, "Released", d.Release)
-	writeField(&b, "Runtime", d.Runtime)
-	writeField(&b, "IMDb rating", strings.TrimSpace(d.IMDBRating))
-	writeField(&b, "Quality", d.VideoQuality)
 	writeField(&b, "Genre", joinNames(d.Genre))
 	writeField(&b, "Country", joinNames(d.Country))
 	writeField(&b, "Director", joinNames(d.Director))
@@ -780,7 +1002,7 @@ func renderDetail(d api.Detail) string {
 	if d.Description != "" {
 		b.WriteString("\n" + d.Description + "\n")
 	}
-	return b.String()
+	return strings.TrimLeft(b.String(), "\n")
 }
 
 // imdbLink builds the public IMDb URL for a title id, or "" when there is none.
@@ -803,7 +1025,10 @@ func (u *UI) setInfo(text string) {
 }
 
 func (u *UI) clearDetail(text string) {
-	u.setInfo(text)
+	u.setInfo("")
+	if u.detailTitle != nil {
+		u.clearDetailHeader(text)
+	}
 	if u.imdbLink != nil {
 		u.imdbLink.Hide()
 	}

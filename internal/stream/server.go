@@ -52,28 +52,29 @@ func New(remoteURL, savePath string) *Server {
 	return s
 }
 
-// Start opens the single upstream connection, begins downloading to the save
-// file, and starts the localhost server. It returns the URL to hand the player.
-func (s *Server) Start(ctx context.Context) (string, error) {
+// begin opens the single upstream connection and starts filling the save file.
+// Both Start and StartDownload build on it; it is the whole download half of
+// this type, with no localhost serving attached.
+func (s *Server) begin(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.remoteURL, nil)
 	if err != nil {
 		cancel()
-		return "", err
+		return err
 	}
 	req.Header.Set("User-Agent", "MovieFinder/0.1")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
 		cancel()
-		return "", fmt.Errorf("open stream: %w", err)
+		return fmt.Errorf("open stream: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
 		cancel()
-		return "", fmt.Errorf("stream source answered %s", resp.Status)
+		return fmt.Errorf("stream source answered %s", resp.Status)
 	}
 	s.total.Store(resp.ContentLength) // -1 when the host omits Content-Length
 
@@ -81,14 +82,31 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	if err != nil {
 		resp.Body.Close()
 		cancel()
-		return "", fmt.Errorf("create save file: %w", err)
+		return fmt.Errorf("create save file: %w", err)
 	}
 
 	go s.download(resp.Body, out)
+	return nil
+}
+
+// StartDownload downloads to the save file without starting the localhost
+// server. It is what the download queue uses: a queued job has no player
+// attached, so binding a port (and provoking a firewall prompt) would buy
+// nothing. Pause, Resume, Stop and Progress all behave the same as for Start.
+func (s *Server) StartDownload(ctx context.Context) error {
+	return s.begin(ctx)
+}
+
+// Start opens the single upstream connection, begins downloading to the save
+// file, and starts the localhost server. It returns the URL to hand the player.
+func (s *Server) Start(ctx context.Context) (string, error) {
+	if err := s.begin(ctx); err != nil {
+		return "", err
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		cancel()
+		s.Stop() // the download is already running; tear it back down
 		return "", fmt.Errorf("start local server: %w", err)
 	}
 	// Give the local URL the real file extension so the player recognises the

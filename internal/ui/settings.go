@@ -49,8 +49,16 @@ func (u *UI) showSettings() {
 	}
 	subtitlesKey.SetPlaceHolder("leave blank to use the built-in key")
 
+	// Database 2's whole endpoint shape, not just its domains: this server
+	// rotates hosts and has changed its URL layout between app releases, so
+	// each piece is editable and blank means "use the built-in default".
 	delfanLoginHost := entryWith(cfg.DelfanLoginHost, delfan.DefaultLoginHost+" (default)")
 	delfanAPIHost := entryWith(cfg.DelfanAPIHost, delfan.DefaultAPIHost+" (default)")
+	delfanBasePath := entryWith(cfg.DelfanBasePath, delfan.DefaultBasePath+" (default)")
+	delfanLoginEndpoint := entryWith(cfg.DelfanLoginEndpoint, delfan.DefaultLoginEndpoint+" (default)")
+	delfanAPIEndpoint := entryWith(cfg.DelfanAPIEndpoint, delfan.DefaultAPIEndpoint+" (default)")
+	delfanAPIKey := entryWith(cfg.DelfanAPIKey, "leave blank for the built-in key")
+	delfanAppVersion := entryWith(cfg.DelfanAppVersion, delfan.DefaultAppVersion+" (default)")
 
 	playerPath := entryWith(cfg.PlayerPath, "auto-detect (PotPlayer, mpv, VLC, MPC-HC)")
 
@@ -75,6 +83,11 @@ func (u *UI) showSettings() {
 		}
 		next.DelfanLoginHost = strings.TrimSpace(delfanLoginHost.Text)
 		next.DelfanAPIHost = strings.TrimSpace(delfanAPIHost.Text)
+		next.DelfanBasePath = strings.TrimSpace(delfanBasePath.Text)
+		next.DelfanLoginEndpoint = strings.TrimSpace(delfanLoginEndpoint.Text)
+		next.DelfanAPIEndpoint = strings.TrimSpace(delfanAPIEndpoint.Text)
+		next.DelfanAPIKey = strings.TrimSpace(delfanAPIKey.Text)
+		next.DelfanAppVersion = strings.TrimSpace(delfanAppVersion.Text)
 		next.PlayerPath = strings.TrimSpace(playerPath.Text)
 		if n, err := strconv.Atoi(timeout.Text); err == nil && n > 0 {
 			next.TimeoutSeconds = n
@@ -121,7 +134,35 @@ func (u *UI) showSettings() {
 		}()
 	}
 
+	// Database 2 has no host list to walk, so its check is a single real call
+	// through the whole signed session: login, seed the nonce, fetch. That is
+	// the only way to tell a good endpoint shape from a bad one.
+	delfanResult := widget.NewLabel("")
+	delfanResult.Wrapping = fyne.TextWrapWord
+	delfanTest := widget.NewButton("Test Database 2", nil)
+	delfanTest.OnTapped = func() {
+		candidate := collect()
+		delfanTest.Disable()
+		delfanResult.SetText("Testing…")
+
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			items, err := delfan.NewWithOptions(delfanOptions(candidate)).Home(ctx)
+			cancel()
+
+			fyne.Do(func() {
+				delfanTest.Enable()
+				if err != nil {
+					delfanResult.SetText("x " + firstLine(err.Error()))
+					return
+				}
+				delfanResult.SetText(fmt.Sprintf("ok — %d title(s)", len(items)))
+			})
+		}()
+	}
+
 	form := []*widget.FormItem{
+		{Text: "", Widget: settingsHeading("Database 1")},
 		{Text: "Hosts", Widget: hosts, HintText: "One per line, tried top to bottom. The first that answers is used until it fails."},
 		{Text: "Base path", Widget: basePath},
 		{Text: "API secret key", Widget: secretKey},
@@ -131,9 +172,19 @@ func (u *UI) showSettings() {
 		{Text: "", Widget: insecure, HintText: "Only needed for https:// hosts, which currently serve a certificate for a different name."},
 		{Text: "Timeout (s)", Widget: timeout},
 		{Text: "", Widget: container.NewVBox(testButton, testResult)},
+
+		{Text: "", Widget: settingsHeading("Database 2")},
+		{Text: "Login host", Widget: delfanLoginHost, HintText: "Every field here may be left blank to use the built-in default. Change them if Database 2 moves or its URLs change."},
+		{Text: "API host", Widget: delfanAPIHost},
+		{Text: "Base path", Widget: delfanBasePath, HintText: "Path prefix shared by both hosts."},
+		{Text: "Login endpoint", Widget: delfanLoginEndpoint},
+		{Text: "API endpoint", Widget: delfanAPIEndpoint, HintText: "File name serving the gated actions."},
+		{Text: "API key", Widget: delfanAPIKey, HintText: "The key= parameter sent on every request."},
+		{Text: "App version", Widget: delfanAppVersion, HintText: "Folded into the signed request body. Change only if the server starts rejecting a correct host."},
+		{Text: "", Widget: container.NewVBox(delfanTest, delfanResult)},
+
+		{Text: "", Widget: settingsHeading("Other")},
 		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Optional — overrides the built-in key. Get your own at " + opensubtitles.RegisterURL},
-		{Text: "Database 2 login host", Widget: delfanLoginHost, HintText: "Leave blank for the default. Change if the Database 2 source stops working."},
-		{Text: "Database 2 API host", Widget: delfanAPIHost},
 		{Text: "Video player", Widget: playerPath, HintText: "Path to a player exe, or blank to auto-detect. Play passes the stream and subtitle to it."},
 	}
 
@@ -161,7 +212,7 @@ func (u *UI) showSettings() {
 
 		u.cfg = next
 		u.client = api.New(next)
-		u.delfan = delfan.New(next.DelfanLoginHost, next.DelfanAPIHost)
+		u.delfan = delfan.NewWithOptions(delfanOptions(next))
 		u.subtitles = opensubtitles.New(opensubtitles.ResolveKey(next.OpenSubtitlesAPIKey))
 		u.setStatus("Settings saved.")
 		u.reload(1)
@@ -175,6 +226,13 @@ func (u *UI) showSettings() {
 		fyne.Min(600, win.Height-40),
 	))
 	d.Show()
+}
+
+// settingsHeading names a group of fields, so the two databases are not one
+// undifferentiated wall of inputs.
+func settingsHeading(text string) fyne.CanvasObject {
+	label := widget.NewLabelWithStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	return container.NewVBox(widget.NewSeparator(), label)
 }
 
 func entryWith(value, placeholder string) *widget.Entry {

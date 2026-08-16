@@ -10,3 +10,9 @@ certs/*.crt
 # Built-in API key, compiled in but kept out of the repo. key.go.example is the
 # committed template; the real key.go is never committed.
 internal/opensubtitles/key.go
+
+# Generated UI preview renders (see internal/ui/preview_test.go).
+internal/ui/testdata/preview/
+
+# macOS Finder metadata.
+.DS_Store

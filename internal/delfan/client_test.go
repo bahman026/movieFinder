@@ -103,13 +103,13 @@ func TestNonceFormula(t *testing.T) {
 }
 
 func TestBuildBodyStructure(t *testing.T) {
-	body := buildBody("AUTHXY")
+	body := buildBody("AUTHXY", DefaultAppVersion)
 	// head(32) + auth + mid1 + mid2 + auth + tail + appversion + tail_md5(32)
 	if len(body) < 64 {
 		t.Fatalf("body too short: %d", len(body))
 	}
 	mid := body[32 : len(body)-32]
-	want := "AUTHXY" + constMid1 + constMid2 + "AUTHXY" + constTail + appVersion
+	want := "AUTHXY" + constMid1 + constMid2 + "AUTHXY" + constTail + DefaultAppVersion
 	if mid != want {
 		t.Errorf("body middle = %q, want %q", mid, want)
 	}

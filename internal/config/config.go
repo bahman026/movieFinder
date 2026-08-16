@@ -44,10 +44,18 @@ type Config struct {
 	// API refuses every request.
 	OpenSubtitlesAPIKey string `json:"opensubtitles_api_key"`
 
-	// Delfan hosts. Both rotate, so these are overridable; empty falls back to
-	// the current defaults baked into the delfan client.
-	DelfanLoginHost string `json:"delfan_login_host"`
-	DelfanAPIHost   string `json:"delfan_api_host"`
+	// Delfan (Database 2) endpoint shape. The hosts rotate and the URL layout
+	// has changed across releases of the app this speaks to, so the whole shape
+	// is overridable rather than just the domains — a move can be followed from
+	// Settings instead of needing a new build. Empty means "use the default
+	// baked into the delfan client".
+	DelfanLoginHost     string `json:"delfan_login_host"`
+	DelfanAPIHost       string `json:"delfan_api_host"`
+	DelfanBasePath      string `json:"delfan_base_path"`
+	DelfanLoginEndpoint string `json:"delfan_login_endpoint"`
+	DelfanAPIEndpoint   string `json:"delfan_api_endpoint"`
+	DelfanAPIKey        string `json:"delfan_api_key"`
+	DelfanAppVersion    string `json:"delfan_app_version"`
 
 	// PlayerPath is an explicit external video player executable. Empty means
 	// auto-detect (PotPlayer, mpv, VLC, MPC-HC).
