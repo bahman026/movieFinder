@@ -179,15 +179,50 @@ A Mac app built for `arm64` will not run on an Intel Mac. The other direction wo
 git checkout -- FyneApp.toml
 ```
 
+### Sending the app to someone else
+
+**A `.app` is a folder, not a file.** Telegram, WhatsApp and email have nothing to attach when you point them at it, no matter how small it is. Compress it into one file first.
+
+`./build-mac.sh` already writes that file for you:
+
+```
+dist/MovieFinder-mac-arm64.zip     (about 11 MB)
+```
+
+Send **that**. To make it by hand instead, either right-click `MovieFinder.app` in Finder → **Compress**, or:
+
+```bash
+cd dist && ditto -c -k --sequesterRsrc --keepParent MovieFinder.app MovieFinder-mac.zip
+```
+
+> Use `ditto`, not `zip`. A Mac app bundle contains symlinks and file metadata that plain `zip` can flatten, which produces an app that will not start on the other end.
+
+Two things to tell whoever receives it:
+
+1. **Unzip it first, then move `MovieFinder.app` to Applications.** Running it from inside the Downloads zip preview does not work.
+2. **The first launch needs approval** — see just below.
+
+Also check which Mac they have: the `arm64` file will not run on an Intel Mac. Ask them, or send both (`./build-mac.sh amd64` builds the Intel one).
+
 ### Opening the app on a different Mac
 
 The app is not signed with an Apple developer certificate. On the Mac that built it, it just opens. Copy it to **another** Mac and macOS will quarantine it and refuse to start it (*"Apple could not verify..."*). On that Mac, either:
 
-- right-click the app → **Open** → **Open** (only needed the first time), or
-- clear the quarantine flag:
-  ```bash
-  xattr -dr com.apple.quarantine /Applications/MovieFinder.app
-  ```
+**On macOS 15 (Sequoia) and newer** — including macOS 26 — do this once, on the receiving Mac:
+
+1. Double-click the app. macOS refuses and says it cannot verify the developer.
+2. Open **System Settings → Privacy & Security**, scroll to the bottom.
+3. There is now a line about MovieFinder being blocked — click **Open Anyway**.
+4. Confirm. From then on it opens normally.
+
+> The old trick of right-clicking the app and choosing **Open** no longer works on these versions; Apple removed that shortcut in macOS 15. The Settings route above is the replacement.
+
+If they are comfortable in Terminal, this does the same thing in one step:
+```bash
+xattr -dr com.apple.quarantine /Applications/MovieFinder.app
+```
+
+> **Why this happens:** signing an app so it opens with no warning requires a paid Apple Developer account ($99/year) and notarising each build with Apple. This app is only ad-hoc signed, which is enough for macOS to run it, but not enough for it to be trusted silently.
 
 ### Playing videos needs a separate player
 
@@ -211,7 +246,7 @@ Every build puts its result in the `dist/` folder:
 | --- | --- | --- | --- |
 | Windows | `.\build.ps1` | `dist\MovieFinder.exe` | Docker |
 | Linux | `.\build-linux.ps1` | `dist/MovieFinder` | Docker |
-| macOS | `./build-mac.sh` | `dist/MovieFinder.app` | Go on the Mac itself |
+| macOS | `./build-mac.sh` | `dist/MovieFinder.app` **+** `dist/MovieFinder-mac-arm64.zip` | Go on the Mac itself |
 
 You can copy that one file (or, on macOS, the one `.app` folder) to another computer of the same type and run it — nothing else needs to be installed.
 
@@ -228,6 +263,8 @@ You can copy that one file (or, on macOS, the one `.app` folder) to another comp
 | macOS: `go: command not found` | Go isn't installed — see step **1f**. |
 | macOS: build stops on a missing header or SDK | Apple's tools are missing: `xcode-select --install` (step **1f**). |
 | macOS: *"Apple could not verify..."* when opening | Expected for an unsigned app copied from another Mac — see [section 4](#opening-the-app-on-a-different-mac). |
+| macOS: *"MovieFinder is damaged and can't be opened"* | The bundle's signature is broken — rebuild with `./build-mac.sh`, which signs it, and send the `.zip` it produces rather than a hand-made one. |
+| Can't attach the app to Telegram / email | A `.app` is a folder. Send `dist/MovieFinder-mac-arm64.zip` instead — see [section 4](#sending-the-app-to-someone-else). |
 | macOS: `FyneApp.toml` shows up as changed in git | The packaging step rewrote it. `git checkout -- FyneApp.toml`, and prefer `./build-mac.sh`, which restores it automatically. |
 | "No video player found" | Install VLC, mpv or IINA, or set the player path in **Settings** — see the end of [section 4](#4-build-for-macos). |
 
