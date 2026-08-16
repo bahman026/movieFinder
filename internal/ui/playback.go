@@ -15,7 +15,6 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"moviefinder/internal/opensubtitles"
 	"moviefinder/internal/player"
 	"moviefinder/internal/stream"
 )
@@ -54,13 +53,11 @@ func (u *UI) playLink(videoURL, linkLabel string) {
 	status := widget.NewLabel("Searching subtitles…")
 	results := container.NewVBox()
 
-	langSelect := widget.NewSelect(languageLabels(), nil)
-	langSelect.SetSelected(languageLabel("en"))
-
 	playNow := widget.NewButtonWithIcon("Play without subtitle", theme.MediaPlayIcon(), func() {
 		doPlay(nil, "")
 	})
 
+	var controls *subtitleControls
 	var cancelSearch context.CancelFunc
 	runSearch := func() {
 		if strings.TrimSpace(title) == "" {
@@ -70,26 +67,29 @@ func (u *UI) playLink(videoURL, linkLabel string) {
 		if cancelSearch != nil {
 			cancelSearch()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		cancelSearch = cancel
 
-		lang := languageCode(langSelect.Selected)
+		search := u.subtitleSearcher(controls.sourceCode())
+		query := controls.query(title, imdbID, year)
+		language := controls.language.Selected
+		sourceName := controls.source.Selected
 		status.SetText("Searching subtitles…")
 		results.RemoveAll()
 		results.Refresh()
 
-		go func() {
-			subs, err := u.subtitles.Search(ctx, title, imdbID, year, lang)
+		u.bg("The subtitle search", func() {
+			subs, err := search(ctx, query)
 			if ctx.Err() != nil {
 				return
 			}
-			fyne.Do(func() {
+			u.onUI("The subtitle search", func() {
 				if err != nil {
-					status.SetText("Subtitle search failed: " + firstLine(err.Error()))
+					status.SetText(playSourceFailureMessage(sourceName, err))
 					return
 				}
 				if len(subs) == 0 {
-					status.SetText(fmt.Sprintf("No %s subtitles — you can still play without one.", langSelect.Selected))
+					status.SetText(fmt.Sprintf("No %s subtitles — you can still play without one.", language))
 					return
 				}
 				status.SetText(fmt.Sprintf("%d subtitle(s) — pick one to play with, or play without.", len(subs)))
@@ -98,15 +98,15 @@ func (u *UI) playLink(videoURL, linkLabel string) {
 				}
 				results.Refresh()
 			})
-		}()
+		})
 	}
-	langSelect.OnChanged = func(string) { runSearch() }
+	controls = u.newSubtitleControls(runSearch)
 
 	header := container.NewVBox(
 		widget.NewLabelWithStyle("Play: "+linkLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewLabel("Player: "+p.Name),
 		downloadCheck,
-		container.NewBorder(nil, nil, widget.NewLabel("Subtitle language:"), nil, langSelect),
+		controls.widget,
 		playNow,
 		status,
 		widget.NewSeparator(),
@@ -123,49 +123,36 @@ func (u *UI) playLink(videoURL, linkLabel string) {
 
 // playSubtitleRow renders one subtitle with a "Play with this" button that
 // downloads the subtitle bytes, then hands them to doPlay.
-func (u *UI) playSubtitleRow(sub opensubtitles.Subtitle, doPlay func(subData []byte, subName string)) fyne.CanvasObject {
-	name := sub.MovieName
-	if name == "" {
-		name = "(unknown title)"
-	}
-	if sub.Year != "" {
-		name += " (" + sub.Year + ")"
-	}
-	titleLabel := widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+func (u *UI) playSubtitleRow(sub subtitleHit, doPlay func(subData []byte, subName string)) fyne.CanvasObject {
+	titleLabel := widget.NewLabelWithStyle(sub.title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	release := widget.NewLabel(sub.Release)
+	release := widget.NewLabel(sub.release)
 	release.Wrapping = fyne.TextWrapWord
 
-	var meta []string
-	if d := sub.UploadDateLabel(); d != "" {
-		meta = append(meta, d)
-	}
-	meta = append(meta, fmt.Sprintf("%d downloads", sub.DownloadCount))
-	if sub.HD {
-		meta = append(meta, "HD")
-	}
-	metaLabel := widget.NewLabel(strings.Join(meta, " · "))
+	metaLabel := widget.NewLabel(strings.Join(sub.meta, " · "))
 	metaLabel.TextStyle = fyne.TextStyle{Italic: true}
 
 	playButton := widget.NewButtonWithIcon("Play with this", theme.MediaPlayIcon(), nil)
 	playButton.OnTapped = func() {
 		playButton.Disable()
 		playButton.SetText("Preparing…")
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		u.bg("The subtitle download", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
-			data, fileName, err := u.subtitles.Download(ctx, sub.FileID)
-			fyne.Do(func() {
+			data, fileName, err := sub.download(ctx)
+			u.onUI("The subtitle download", func() {
 				playButton.Enable()
 				playButton.SetText("Play with this")
 				if err != nil {
-					dialog.ShowError(err, u.window)
+					// The subtitle is the optional half of this dialog: say so,
+					// and leave Play without subtitle sitting right there.
+					dialog.ShowError(fmt.Errorf("could not download that subtitle: %w\n\nYou can pick another, or play without one", err), u.window)
 					return
 				}
 				doPlay(data, fileName)
 			})
-		}()
+		})
 	}
 
 	return container.NewVBox(
@@ -255,7 +242,7 @@ func (u *UI) startDownloadAndPlay(p player.Player, remoteURL, linkLabel string, 
 		u.setStatus("Streaming + saving…")
 		u.showDownloadControls()
 		u.closePlayDialog()
-		go u.watchProgress(srv, savePath)
+		u.bg("The download progress display", func() { u.watchProgress(srv, savePath) })
 	}, u.window)
 
 	save.SetFileName(suggestedSaveName(remoteURL))
@@ -285,7 +272,7 @@ func (u *UI) watchProgress(srv *stream.Server, savePath string) {
 	for range ticker.C {
 		downloaded, total, done, derr := srv.Progress()
 		stop := false
-		fyne.Do(func() {
+		u.onUI("The download progress display", func() {
 			if u.activeStream != srv {
 				stop = true // a newer playback (or a cancel) took over
 				return

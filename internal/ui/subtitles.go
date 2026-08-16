@@ -13,8 +13,6 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-
-	"moviefinder/internal/opensubtitles"
 )
 
 // subtitleLanguages are the choices offered in the language picker — enough to
@@ -69,7 +67,7 @@ func imdbNumeric(id string) string {
 }
 
 // showSubtitles opens a dialog to search and download subtitles for the
-// currently loaded detail, defaulting to English.
+// currently loaded detail, defaulting to English and the configured source.
 func (u *UI) showSubtitles() {
 	u.mu.RLock()
 	title := u.subTitle
@@ -85,35 +83,36 @@ func (u *UI) showSubtitles() {
 	status := widget.NewLabel("Searching…")
 	results := container.NewVBox()
 
-	langSelect := widget.NewSelect(languageLabels(), nil)
-	langSelect.SetSelected(languageLabel("en"))
-
+	var controls *subtitleControls
 	var cancelSearch context.CancelFunc
 	runSearch := func() {
 		if cancelSearch != nil {
 			cancelSearch()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		cancelSearch = cancel
 
-		lang := languageCode(langSelect.Selected)
+		search := u.subtitleSearcher(controls.sourceCode())
+		query := controls.query(title, imdbID, year)
+		language := controls.language.Selected
+		sourceName := controls.source.Selected
 		status.SetText("Searching…")
 		results.RemoveAll()
 		results.Refresh()
 
-		go func() {
-			subs, err := u.subtitles.Search(ctx, title, imdbID, year, lang)
+		u.bg("The subtitle search", func() {
+			subs, err := search(ctx, query)
 			if ctx.Err() != nil {
 				return // superseded by a newer search (language changed again)
 			}
 
-			fyne.Do(func() {
+			u.onUI("The subtitle search", func() {
 				if err != nil {
-					status.SetText("Failed: " + firstLine(err.Error()))
+					status.SetText(sourceFailureMessage(sourceName, err))
 					return
 				}
 				if len(subs) == 0 {
-					status.SetText(fmt.Sprintf("No %s subtitles found for %s.", langSelect.Selected, title))
+					status.SetText(fmt.Sprintf("No %s subtitles found for %s.", language, title))
 					return
 				}
 				status.SetText(fmt.Sprintf("%d result(s).", len(subs)))
@@ -122,9 +121,9 @@ func (u *UI) showSubtitles() {
 				}
 				results.Refresh()
 			})
-		}()
+		})
 	}
-	langSelect.OnChanged = func(string) { runSearch() }
+	controls = u.newSubtitleControls(runSearch)
 
 	heading := title
 	if year != "" {
@@ -134,7 +133,7 @@ func (u *UI) showSubtitles() {
 	content := container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle(heading, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			container.NewBorder(nil, nil, widget.NewLabel("Language:"), nil, langSelect),
+			controls.widget,
 			status,
 			widget.NewSeparator(),
 		),
@@ -150,32 +149,13 @@ func (u *UI) showSubtitles() {
 }
 
 // subtitleRow renders one search result with a Download button.
-func (u *UI) subtitleRow(sub opensubtitles.Subtitle) fyne.CanvasObject {
-	name := sub.MovieName
-	if name == "" {
-		name = "(unknown title)"
-	}
-	if sub.Year != "" {
-		name += " (" + sub.Year + ")"
-	}
+func (u *UI) subtitleRow(sub subtitleHit) fyne.CanvasObject {
+	titleLabel := widget.NewLabelWithStyle(sub.title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	titleLabel := widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-
-	release := widget.NewLabel(sub.Release)
+	release := widget.NewLabel(sub.release)
 	release.Wrapping = fyne.TextWrapWord
 
-	var meta []string
-	if uploaded := sub.UploadDateLabel(); uploaded != "" {
-		meta = append(meta, "Uploaded "+uploaded)
-	}
-	meta = append(meta, fmt.Sprintf("%d downloads", sub.DownloadCount))
-	if sub.Rating > 0 {
-		meta = append(meta, fmt.Sprintf("%.1f rating", sub.Rating))
-	}
-	if sub.HD {
-		meta = append(meta, "HD")
-	}
-	metaLabel := widget.NewLabel(strings.Join(meta, " · "))
+	metaLabel := widget.NewLabel(strings.Join(sub.meta, " · "))
 	metaLabel.TextStyle = fyne.TextStyle{Italic: true}
 
 	downloadButton := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), nil)
@@ -189,17 +169,17 @@ func (u *UI) subtitleRow(sub opensubtitles.Subtitle) fyne.CanvasObject {
 	)
 }
 
-func (u *UI) downloadSubtitle(sub opensubtitles.Subtitle, button *widget.Button) {
+func (u *UI) downloadSubtitle(sub subtitleHit, button *widget.Button) {
 	button.Disable()
 	button.SetText("Downloading…")
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	u.bg("The subtitle download", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		data, fileName, err := u.subtitles.Download(ctx, sub.FileID)
+		data, fileName, err := sub.download(ctx)
 
-		fyne.Do(func() {
+		u.onUI("The subtitle download", func() {
 			button.Enable()
 			button.SetText("Download")
 
@@ -208,11 +188,11 @@ func (u *UI) downloadSubtitle(sub opensubtitles.Subtitle, button *widget.Button)
 				return
 			}
 			if fileName == "" {
-				fileName = sub.Release
+				fileName = sub.release
 			}
 			u.saveSubtitle(safeSubtitleName(fileName), data)
 		})
-	}()
+	})
 }
 
 // saveSubtitle lets the user pick where to keep the file via the OS's native

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"moviefinder/internal/safe"
 )
 
 // Server tees one upstream download to a save file and a localhost HTTP server.
@@ -85,7 +87,13 @@ func (s *Server) begin(ctx context.Context) error {
 		return fmt.Errorf("create save file: %w", err)
 	}
 
-	go s.download(resp.Body, out)
+	// Guarded: this goroutine outlives the call, and a panic on it would take
+	// the app down mid-download. Recovering ends the transfer the same way a
+	// read error would, so the player and the queue both see a normal failure.
+	safe.Go(
+		func() { s.download(resp.Body, out) },
+		func(err error) { s.finish(err) },
+	)
 	return nil
 }
 
@@ -117,7 +125,7 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.serve)
 	s.httpSrv = &http.Server{Handler: mux}
-	go s.httpSrv.Serve(ln)
+	safe.Go(func() { _ = s.httpSrv.Serve(ln) }, nil)
 
 	return s.local, nil
 }

@@ -15,6 +15,7 @@ import (
 	"moviefinder/internal/api"
 	"moviefinder/internal/config"
 	"moviefinder/internal/delfan"
+	"moviefinder/internal/mysubs"
 	"moviefinder/internal/opensubtitles"
 )
 
@@ -49,6 +50,13 @@ func (u *UI) showSettings() {
 	}
 	subtitlesKey.SetPlaceHolder("leave blank to use the built-in key")
 
+	// Which source the subtitle pickers open on. Both stay available in the
+	// dialogs themselves; this only sets the starting choice.
+	subtitleSource := widget.NewSelect(sourceLabels(), nil)
+	subtitleSource.SetSelected(sourceLabel(cfg.SubtitleProvider))
+
+	mysubsHost := entryWith(cfg.MySubsBaseURL, mysubs.DefaultBaseURL+" (default)")
+
 	// Database 2's whole endpoint shape, not just its domains: this server
 	// rotates hosts and has changed its URL layout between app releases, so
 	// each piece is editable and blank means "use the built-in default".
@@ -81,6 +89,8 @@ func (u *UI) showSettings() {
 		} else {
 			next.OpenSubtitlesAPIKey = ""
 		}
+		next.SubtitleProvider = sourceCode(subtitleSource.Selected)
+		next.MySubsBaseURL = strings.TrimRight(strings.TrimSpace(mysubsHost.Text), "/")
 		next.DelfanLoginHost = strings.TrimSpace(delfanLoginHost.Text)
 		next.DelfanAPIHost = strings.TrimSpace(delfanAPIHost.Text)
 		next.DelfanBasePath = strings.TrimSpace(delfanBasePath.Text)
@@ -108,7 +118,7 @@ func (u *UI) showSettings() {
 		testButton.Disable()
 		testResult.SetText("Testing…")
 
-		go func() {
+		u.bg("The host test", func() {
 			// Test every host individually rather than through the failover
 			// path, so a working mirror cannot hide a broken one.
 			var lines []string
@@ -127,11 +137,11 @@ func (u *UI) showSettings() {
 				lines = append(lines, fmt.Sprintf("ok %s — %d title(s)", host, len(movies)))
 			}
 
-			fyne.Do(func() {
+			u.onUI("The host test", func() {
 				testButton.Enable()
 				testResult.SetText(strings.Join(lines, "\n"))
 			})
-		}()
+		})
 	}
 
 	// Database 2 has no host list to walk, so its check is a single real call
@@ -145,12 +155,12 @@ func (u *UI) showSettings() {
 		delfanTest.Disable()
 		delfanResult.SetText("Testing…")
 
-		go func() {
+		u.bg("The Database 2 test", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			items, err := delfan.NewWithOptions(delfanOptions(candidate)).Home(ctx)
 			cancel()
 
-			fyne.Do(func() {
+			u.onUI("The Database 2 test", func() {
 				delfanTest.Enable()
 				if err != nil {
 					delfanResult.SetText("x " + firstLine(err.Error()))
@@ -158,7 +168,7 @@ func (u *UI) showSettings() {
 				}
 				delfanResult.SetText(fmt.Sprintf("ok — %d title(s)", len(items)))
 			})
-		}()
+		})
 	}
 
 	form := []*widget.FormItem{
@@ -183,8 +193,12 @@ func (u *UI) showSettings() {
 		{Text: "App version", Widget: delfanAppVersion, HintText: "Folded into the signed request body. Change only if the server starts rejecting a correct host."},
 		{Text: "", Widget: container.NewVBox(delfanTest, delfanResult)},
 
-		{Text: "", Widget: settingsHeading("Other")},
+		{Text: "", Widget: settingsHeading("Subtitles")},
+		{Text: "Default source", Widget: subtitleSource, HintText: "Both sources stay selectable in the Subtitles and Play dialogs; this is only the one they open on."},
 		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Optional — overrides the built-in key. Get your own at " + opensubtitles.RegisterURL},
+		{Text: "MySubs address", Widget: mysubsHost, HintText: "Blank uses " + mysubs.DefaultBaseURL + ". No key or account is needed; the site is scraped."},
+
+		{Text: "", Widget: settingsHeading("Other")},
 		{Text: "Video player", Widget: playerPath, HintText: "Path to a player exe, or blank to auto-detect. Play passes the stream and subtitle to it."},
 	}
 
@@ -214,6 +228,7 @@ func (u *UI) showSettings() {
 		u.client = api.New(next)
 		u.delfan = delfan.NewWithOptions(delfanOptions(next))
 		u.subtitles = opensubtitles.New(opensubtitles.ResolveKey(next.OpenSubtitlesAPIKey))
+		u.mysubs = mysubs.New(next.MySubsBaseURL)
 		u.setStatus("Settings saved.")
 		u.reload(1)
 	}, u.window)

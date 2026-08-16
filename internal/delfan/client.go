@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"moviefinder/internal/safe"
 )
 
 // Signing constants, recovered from the decompiled app. These are part of the
@@ -323,9 +325,13 @@ func (c *Client) ResolveLinks(ctx context.Context, links []DownloadLink) []strin
 		wg.Add(1)
 		go func(i int, l DownloadLink) {
 			defer wg.Done()
-			if url, err := c.ResolveDownloadURL(ctx, l); err == nil {
-				out[i] = url
-			}
+			// Guarded: one malformed redirect must not panic the app. An entry
+			// that fails is left empty, which callers already handle.
+			safe.Run(func() {
+				if url, err := c.ResolveDownloadURL(ctx, l); err == nil {
+					out[i] = url
+				}
+			}, nil)
 		}(i, l)
 	}
 	wg.Wait()

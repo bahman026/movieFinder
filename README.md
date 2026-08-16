@@ -31,7 +31,7 @@ The built-in OpenSubtitles key is **not** stored in source. Copy `internal/opens
 ```powershell
 docker build --target base -t moviefinder-base .
 docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-base `
-    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/delfan/... ./internal/player/... ./internal/stream/...
+    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/mysubs/... ./internal/delfan/... ./internal/player/... ./internal/stream/... ./internal/download/... ./internal/safe/...
 ```
 
 `./internal/ui` is left out of the unit run because its tests would need a display; it is compiled by the full Windows or Linux build.
@@ -52,12 +52,12 @@ Both are already handled in the Dockerfile, but worth knowing if you build elsew
 - **Details** for the selected title — rating, genre, description, and its download links
 - **Show links** for the title, each with its full URL, a **Play** button and a copy button
 - **Play** — stream a quality in an external player (PotPlayer / mpv / VLC / MPC-HC), optionally with a subtitle applied
-- **Find Subtitles** — search and download from OpenSubtitles for the selected title, on either source
+- **Find Subtitles** — search and download from MySubs or OpenSubtitles for the selected title, on either source
 - **Automatic host failover** between mirrors (MovieFinder source)
 
 ### Playing with subtitles
 
-**Play** on a link opens a dialog: pick a language, choose one of the OpenSubtitles results to play *with*, or **Play without subtitle**. The chosen subtitle is downloaded and handed to the player so it loads automatically — the same idea as VLC's "add subtitle", done for you.
+**Play** on a link opens a dialog: pick a source and language, choose one of the results to play *with*, or **Play without subtitle**. The chosen subtitle is downloaded and handed to the player so it loads automatically — the same idea as VLC's "add subtitle", done for you.
 
 The app does not decode video itself (its GUI toolkit has no media support); it drives a real player, which handles any codec. It auto-detects PotPlayer, mpv, VLC or MPC-HC, using the right subtitle flag for each. If yours lives somewhere unusual, set its path under `Settings → Video player`.
 
@@ -83,11 +83,24 @@ The app does not download the movie files themselves; it surfaces the links for 
 
 ### Subtitles
 
-**Find Subtitles** requires your own free OpenSubtitles API key — register an account and create a "consumer" (API application) at <https://www.opensubtitles.com/en/consumers>, then paste the key into `Settings → OpenSubtitles key`. Without it the API refuses every request with "You cannot consume this service"; this was confirmed against the live service rather than assumed, and it holds for both OpenSubtitles' current REST API and the legacy XML-RPC one VLC traditionally used — the old public test user-agent that used to allow anonymous access has since been disabled.
+There are two sources, chosen with the **Source** dropdown in both the Subtitles and Play dialogs. `Settings → Default source` picks which one they open on.
 
-Searching prefers the title's IMDb id, which OpenSubtitles matches far more precisely than free text, and falls back to title + year only if that comes back empty. Results show the movie name, release filename (the thing you actually match against your video file), upload date, download count and rating, filtered to a language you pick — English by default. Downloading a subtitle opens the OS's native save dialog rather than a fixed folder, since the video it belongs with could be anywhere.
+**MySubs** (default, my-subs.co) needs no key and no account, and imposes **no daily download limit** — the reason it is the default. It matches by title and year, offers ~40 languages including Persian, and shows each entry's release name, language and download count. For a TV series, fill in **Season** and **Episode** and press Enter or **Search**; the site indexes series per episode, so without them it will ask for them.
 
-Downloads made without logging in are quota-limited per IP by OpenSubtitles, typically a handful per day; there's no login flow here, since the anonymous quota is enough for occasional use.
+**OpenSubtitles** requires your own free API key — register an account and create a "consumer" (API application) at <https://www.opensubtitles.com/en/consumers>, then paste the key into `Settings → OpenSubtitles key`. Without it the API refuses every request with "You cannot consume this service"; this was confirmed against the live service rather than assumed, and it holds for both OpenSubtitles' current REST API and the legacy XML-RPC one VLC traditionally used — the old public test user-agent that used to allow anonymous access has since been disabled.
+
+Its advantage is precision: it searches by the title's IMDb id, which matches far more reliably than free text, and falls back to title + year only if that comes back empty. Results show the movie name, release filename (the thing you actually match against your video file), upload date, download count and rating. Its drawback is the quota — **5 downloads per day** per IP without logging in, rolling over at 00:00 UTC. Searching is not metered, only downloading. There is no login flow here; when 5 a day is not enough, use MySubs.
+
+Both sources filter to a language you pick (English by default) and hand the file to the OS's native save dialog rather than a fixed folder, since the video it belongs with could be anywhere.
+
+### When an outside site is down
+
+Subtitles come from other people's servers, and IMDb is a link the app hands to your browser — it never fetches anything from IMDb. None of them can stop the parts that matter:
+
+- A subtitle source being unreachable shows a line in that dialog naming the source and suggesting the other one. Browsing, the detail pane, downloads and playback are untouched.
+- **Play without subtitle** stays available the whole time, including while a search is still running or has just failed.
+- A failed poster or subtitle never interrupts you with a dialog you have to dismiss before carrying on.
+- If something goes wrong in a way nobody anticipated — a site restyled overnight, a server answering with a shape no parser expects — the affected task stops and says so in the status bar. It does not close the window, and a download already in flight keeps going.
 
 ### Posters
 
@@ -151,11 +164,14 @@ internal/api/client_test.go        failover and decoding tests
 internal/config/config.go          settings load/save (%APPDATA%)
 internal/delfan/client.go          Delfan signed API: login, rolling nonce, search, details
 internal/opensubtitles/client.go   OpenSubtitles search and download
+internal/mysubs/client.go          my-subs.co scraper: search, episode pages, download gate
+internal/safe/safe.go              panic guard for background work, so one bad page cannot end the app
 internal/player/player.go          external player detection and launch
 internal/stream/server.go          download-while-playing tee (one connection)
 internal/ui/app.go                 window, poster grid, detail pane, links
 internal/ui/poster.go              poster grid tiles and image cache
 internal/ui/subtitles.go           subtitle search dialog and download
+internal/ui/subprovider.go         the two subtitle sources behind one row widget
 internal/ui/settings.go            settings dialog and per-host connection test
 Dockerfile                         mingw cross-compile to a Windows .exe
 build.ps1                          one-command build wrapper

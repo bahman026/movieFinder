@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"moviefinder/internal/safe"
 	"moviefinder/internal/stream"
 )
 
@@ -362,8 +363,26 @@ func (q *Queue) run() {
 			<-q.wake
 			continue
 		}
-		q.runJob(j)
+		// A panic mid-transfer must not kill this worker: unguarded it would
+		// take the whole process down, and even surviving it would strand
+		// every queued download behind a worker that is no longer running.
+		// The job is marked failed and the queue moves on to the next one.
+		safe.Run(func() { q.runJob(j) }, func(err error) { q.failJob(j, err) })
 	}
+}
+
+// failJob records why a job stopped and releases the worker for the next one.
+// A cancelled job keeps its own state — the user's decision outranks the
+// failure that cancelling caused.
+func (q *Queue) failJob(j *job, err error) {
+	q.mu.Lock()
+	if j.state != StateCanceled {
+		j.state, j.err = StateFailed, err
+	}
+	q.mu.Unlock()
+
+	q.clearActive(j)
+	q.notify()
 }
 
 // takeNext claims the oldest waiting job, or nil when there is nothing to do
@@ -401,13 +420,7 @@ func (q *Queue) runJob(j *job) {
 	q.notify()
 
 	if err := srv.StartDownload(context.Background()); err != nil {
-		q.mu.Lock()
-		if j.state != StateCanceled {
-			j.state, j.err = StateFailed, err
-		}
-		q.mu.Unlock()
-		q.clearActive(j)
-		q.notify()
+		q.failJob(j, err)
 		return
 	}
 

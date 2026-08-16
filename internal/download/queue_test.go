@@ -3,6 +3,9 @@ package download
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -133,6 +136,13 @@ func (f *fakeDownloader) wasStopped() bool {
 // newTestQueue builds a queue whose downloads are fakes, and hands back a
 // lookup so a test can drive each one.
 func newTestQueue(t *testing.T) (*Queue, *tracker, func(string) *fakeDownloader) {
+	return newTestQueueWith(t, nil)
+}
+
+// newTestQueueWith is newTestQueue with the option of substituting a different
+// downloader for particular URLs — a misbehaving one, say. special returns nil
+// for any URL it does not want to take over.
+func newTestQueueWith(t *testing.T, special func(url string) downloader) (*Queue, *tracker, func(string) *fakeDownloader) {
 	t.Helper()
 
 	tr := &tracker{}
@@ -141,6 +151,11 @@ func newTestQueue(t *testing.T) (*Queue, *tracker, func(string) *fakeDownloader)
 
 	q := &Queue{wake: make(chan struct{}, 1)}
 	q.newServer = func(url, savePath string) downloader {
+		if special != nil {
+			if d := special(url); d != nil {
+				return d
+			}
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		f := &fakeDownloader{tracker: tr, name: url}
@@ -177,6 +192,56 @@ func stateOf(q *Queue, id int) State {
 		}
 	}
 	return StateCanceled
+}
+
+// panicDownloader stands in for a transfer that hits something the code never
+// expected — a rotated host answering with a shape no parser handles.
+type panicDownloader struct{}
+
+func (panicDownloader) StartDownload(context.Context) error {
+	panic("the file host answered with something unexpected")
+}
+func (panicDownloader) Progress() (int64, int64, bool, error) { return 0, 0, false, nil }
+func (panicDownloader) Pause()                                {}
+func (panicDownloader) Resume()                               {}
+func (panicDownloader) Stop()                                 {}
+
+// A panic in one transfer must not take the worker with it. Unguarded it would
+// end the whole process — the window closing mid-download — and even surviving
+// that, a dead worker would strand every job queued behind it.
+func TestPanicInOneTransferFailsThatJobAndNotTheQueue(t *testing.T) {
+	// safe.Run logs the recovered stack; keep it out of the test output.
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	q, _, get := newTestQueueWith(t, func(url string) downloader {
+		if url == "url-boom" {
+			return panicDownloader{}
+		}
+		return nil
+	})
+
+	boom := q.Add("Boom", "url-boom", "/tmp/boom")
+	next := q.Add("Fine", "url-fine", "/tmp/fine")
+
+	waitFor(t, "the panicking job to be marked failed", func() bool {
+		return stateOf(q, boom) == StateFailed
+	})
+	waitFor(t, "the queue to carry on to the next job", func() bool {
+		return get("url-fine") != nil
+	})
+
+	get("url-fine").complete()
+	waitFor(t, "the next job to finish normally", func() bool {
+		return stateOf(q, next) == StateDone
+	})
+
+	// The failure is recorded, not swallowed.
+	for _, s := range q.Jobs() {
+		if s.ID == boom && s.Err == nil {
+			t.Error("the failed job carries no error to show the user")
+		}
+	}
 }
 
 // The guarantee the package exists for: many jobs, never two connections.

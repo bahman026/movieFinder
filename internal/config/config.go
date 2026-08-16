@@ -44,6 +44,16 @@ type Config struct {
 	// API refuses every request.
 	OpenSubtitlesAPIKey string `json:"opensubtitles_api_key"`
 
+	// SubtitleProvider is the source the subtitle pickers open on, "mysubs" or
+	// "opensubtitles". Either can still be chosen per search. MySubs is the
+	// default because OpenSubtitles limits anonymous downloads to a handful a
+	// day, which a single evening of watching can exhaust.
+	SubtitleProvider string `json:"subtitle_provider"`
+
+	// MySubsBaseURL overrides the my-subs.co address, for the day that site
+	// moves. Empty uses the built-in default.
+	MySubsBaseURL string `json:"mysubs_base_url"`
+
 	// Delfan (Database 2) endpoint shape. The hosts rotate and the URL layout
 	// has changed across releases of the app this speaks to, so the whole shape
 	// is overridable rather than just the domains — a move can be followed from
@@ -69,12 +79,13 @@ func Default() Config {
 			"http://cdntest.host4dns.n2bapp.ir",
 			"http://mjapiservers.com",
 		},
-		BasePath:       "/playstore/api",
-		APISecretKey:   "343hg4343",
-		Version:        "4.5.0",
-		Country:        "other",
-		SP:             true,
-		TimeoutSeconds: 30,
+		BasePath:         "/playstore/api",
+		APISecretKey:     "343hg4343",
+		Version:          "4.5.0",
+		Country:          "other",
+		SP:               true,
+		TimeoutSeconds:   30,
+		SubtitleProvider: "mysubs",
 	}
 }
 
@@ -141,6 +152,9 @@ func Load() (Config, error) {
 	}
 	if len(cfg.CleanHosts()) == 0 {
 		cfg.Hosts = Default().Hosts
+	}
+	if strings.TrimSpace(cfg.SubtitleProvider) == "" {
+		cfg.SubtitleProvider = Default().SubtitleProvider
 	}
 	return cfg, nil
 }

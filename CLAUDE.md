@@ -21,7 +21,7 @@ Tests and vet run in the build image, which already carries the CA and module ca
 ```powershell
 docker build --target base -t moviefinder-base .
 docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-base `
-    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/delfan/... ./internal/player/... ./internal/stream/...
+    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/mysubs/... ./internal/delfan/... ./internal/player/... ./internal/stream/... ./internal/download/... ./internal/safe/...
 ```
 
 The Dockerfile is a shared `base` stage plus `build-windows` / `build-linux` targets (with `export` / `export-linux` scratch stages). `base` now carries the Linux GL/X11 dev libs too, so it can build both OSes. See BUILD.md for the user-facing build steps.
@@ -56,10 +56,11 @@ These bit during initial setup and are already handled. Don't undo them:
 ```
 cmd/moviefinder  -> internal/ui  -> internal/api            -> internal/config
                                |-> internal/delfan
-                               \-> internal/opensubtitles
+                               |-> internal/opensubtitles
+                               \-> internal/mysubs
 ```
 
-`internal/opensubtitles`, `internal/delfan` and `internal/player` are independent of `internal/api`. The UI switches between two content sources (`sourceMovieFinder`, `sourceDelfan`); `delfan_adapt.go` converts Delfan's types onto `api.Movie`/`api.Detail` so the poster grid and detail pane render both without knowing which source they came from. `fetch`/`fetchDetail` in `app.go` are the two branch points.
+`internal/opensubtitles`, `internal/mysubs`, `internal/delfan` and `internal/player` are independent of `internal/api`. The UI switches between two content sources (`sourceMovieFinder`, `sourceDelfan`); `delfan_adapt.go` converts Delfan's types onto `api.Movie`/`api.Detail` so the poster grid and detail pane render both without knowing which source they came from. `fetch`/`fetchDetail` in `app.go` are the two branch points.
 
 ### Playback
 
@@ -125,6 +126,19 @@ Fyne is not thread-safe. Every widget mutation from a goroutine **must** be wrap
 
 `reload` and `loadDetail` each cancel their previous in-flight request (`cancelLoad`, `cancelDetail`) and drop the response if `ctx.Err() != nil`, so fast typing or fast row-clicking cannot let a stale response win a race.
 
+### Staying up when a third-party site is down
+
+The app talks to several services that are not the movie servers: OpenSubtitles, my-subs.co, and IMDb (a link only — the app never requests anything from IMDb). None of them may be able to stop browsing, downloading or playback, and none of them may close the window.
+
+Two rules carry that:
+
+- **A failure is an error, shown where it happened.** Subtitle searches write to the dialog's own status line (`sourceFailureMessage` / `playSourceFailureMessage`, which name the source and point at the alternative). Listing and detail failures go to the status bar. The Play dialog always keeps **Play without subtitle** live, whatever the subtitle sources are doing.
+- **A panic anywhere must not end the process.** `internal/safe` recovers, logs the stack, and hands a short error to a reporter. In the UI, `u.bg` and `u.onUI` (in `ui/safety.go`) replace bare `go func` and `fyne.Do` — a `fyne.Do` callback runs on the main loop, so an unguarded panic there is just as fatal as one on a goroutine. Outside the UI, the download worker (`download.Queue.run`), the stream download goroutine and Delfan's link resolution are guarded the same way. **Add new background work through those helpers, not with a bare `go`.**
+
+Why a backstop at all, when the clients return errors: every one of these goroutines is running a parser over something a remote server sent. A rotated API answering with a different shape, or a scraped page restyled overnight, produces an index-out-of-range rather than an error — and it would land in the middle of somebody's download. `TestPanicInOneTransferFailsThatJobAndNotTheQueue` pins the queue's half: the job is marked failed, the worker survives, the next job runs.
+
+This is a backstop, not a substitute for handling failures you can see coming. Keep returning errors from the client packages.
+
 ### The poster grid
 
 The listing is a `widget.GridWrap` of `posterCard`, which is a real widget (`ExtendBaseWidget` + `CreateRenderer`) precisely so the update callback can type-assert the item back rather than keeping a side table keyed by `CanvasObject`.
@@ -146,4 +160,28 @@ The listing is a `widget.GridWrap` of `posterCard`, which is a real widget (`Ext
 
 `currentBaseURL` is a package-level `var`, not a `const`, purely so tests can redirect it at an `httptest` server — there's no runtime reason to change it. `flexInt` exists because `feature_details.year` is documented as a JSON number but this API has been known to drift, and it can't be verified live without an account; it accepts either a number or a string rather than failing the whole decode.
 
-There is no login flow — downloads are anonymous and quota-limited per IP by OpenSubtitles (typically a handful/day). Add one only if a user actually hits that limit; it's not worth the added credential-storage surface otherwise.
+There is no login flow — downloads are anonymous and quota-limited per IP by OpenSubtitles. The limit is **5 downloads/day**, confirmed live: the `/download` response carries `requests` and `remaining` counters plus a `reset_time`, and the quota rolls over at 00:00 UTC. Searching is not metered, only downloading. That ceiling is why `internal/mysubs` exists; logging in raises the allowance but does not remove the cap, which is why adding a login still is not worth the credential-storage surface.
+
+### MySubs (my-subs.co), the second subtitle source
+
+`internal/mysubs` is a scraper, not an API client — my-subs.co publishes no API and needs no key or account, which is the whole point: it has no per-user download quota. The UI picks between the two sources per search (`ui/subprovider.go`), defaulting to `config.SubtitleProvider`.
+
+Three page shapes carry everything:
+
+```
+/search.php?key=…                                     two panels: Tv Shows, Movies
+/film-versions-{id}-{slug}-subtitles                  a movie's subtitles, all languages
+/versions-{id}-{episode}-{season}-{slug}-subtitles    one episode's subtitles
+```
+
+Things that will bite whoever touches this next:
+
+- **The episode URL is episode-then-season, not season-then-episode.** Read off the site's own dropdowns: season 2 episode 3 is `/versions-{id}-3-2-…`. The wrong order still returns a valid page for a different episode, so it fails silently. `TestEpisodeURLPutsEpisodeBeforeSeason` guards it.
+- **The two page shapes need two parsers.** Movie pages list one anchor per subtitle (language in the flag's `title`, release in `<strong>`, count in `<b>`); episode pages group rows under a `<div class='version'>` heading and use single-quoted attributes. `parseSubtitlePage` tries the movie shape and falls back to the episode one.
+- **`/downloads/{token}` is a gate page, not the file.** It holds a 10s JavaScript countdown and the real path in a `REAL_URL` variable. The countdown is client-side only, but the `PHPSESSID` cookie the gate sets is not — the file URL answers `302` without it. Hence the client's `cookiejar` and the two-request `Download`. `TestDownloadPassesTheGateAndKeepsTheSession` covers both halves.
+- **Cloudflare fronts the site**, so requests carry a browser `User-Agent`; a blank or obviously scripted one gets a challenge page instead of HTML.
+- **Language names are inconsistent** on one and the same page: `english`, `Persian`, `Farsi/Persian`, `Portuguese (Brazilian)`. `languageAliases` maps the picker's ISO codes onto case-insensitive substrings rather than exact names.
+- **Matching is by title and year only** — the site exposes no IMDb id anywhere. `pickTitle` scores hits because the site's own order is alphabetical, so "Breaking Bad" lists "Breaking Bad Minisodes" first. A series hit with no season/episode given returns an error asking for them rather than guessing S01E01.
+- Some uploads are zipped; `Download` unwraps the first subtitle inside so the player always gets a subtitle file.
+
+The parsing is regex-based on purpose: the markup is machine-generated and simple, and an HTML-parser dependency would be one more module for the Docker build to resolve. The opt-in `MYSUBS_LIVE=1` tests are the real check — a restyle breaks a scraper silently, and only the live pages will tell you.

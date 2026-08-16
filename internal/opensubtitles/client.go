@@ -96,15 +96,35 @@ func (s Subtitle) UploadDateLabel() string {
 // year instead, since the two lookups are indexed independently and one being
 // empty does not mean the other will be.
 func (c *Client) Search(ctx context.Context, title, imdbID, year, language string) ([]Subtitle, error) {
+	return c.SearchEpisode(ctx, title, imdbID, year, language, 0, 0)
+}
+
+// SearchEpisode is Search narrowed to one episode of a series; season and
+// episode are both zero for a film, which makes it plain Search.
+//
+// The identifier changes meaning for an episode: OpenSubtitles indexes every
+// episode under its own imdb_id, while the id this app carries is the series'
+// one — so it goes in parent_imdb_id, next to the season and episode numbers.
+// The year is dropped too, since it would be read as the episode's air year.
+func (c *Client) SearchEpisode(ctx context.Context, title, imdbID, year, language string, season, episode int) ([]Subtitle, error) {
 	if c.apiKey == "" {
 		return nil, fmt.Errorf("add your OpenSubtitles API key in Settings — get a free one at %s", RegisterURL)
 	}
 	if language == "" {
 		language = "en"
 	}
+	episodic := season > 0 && episode > 0
 
 	if imdbID != "" {
-		subs, err := c.search(ctx, url.Values{"imdb_id": {imdbID}, "languages": {language}})
+		q := url.Values{"languages": {language}}
+		if episodic {
+			q.Set("parent_imdb_id", imdbID)
+		} else {
+			q.Set("imdb_id", imdbID)
+		}
+		addEpisode(q, season, episode)
+
+		subs, err := c.search(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -118,10 +138,18 @@ func (c *Client) Search(ctx context.Context, title, imdbID, year, language strin
 		return nil, fmt.Errorf("need a title or an IMDb id to search")
 	}
 	q := url.Values{"query": {title}, "languages": {language}}
-	if year != "" {
+	if year != "" && !episodic {
 		q.Set("year", year)
 	}
+	addEpisode(q, season, episode)
 	return c.search(ctx, q)
+}
+
+func addEpisode(q url.Values, season, episode int) {
+	if season > 0 && episode > 0 {
+		q.Set("season_number", strconv.Itoa(season))
+		q.Set("episode_number", strconv.Itoa(episode))
+	}
 }
 
 func (c *Client) search(ctx context.Context, query url.Values) ([]Subtitle, error) {

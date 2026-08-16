@@ -23,6 +23,7 @@ import (
 	"moviefinder/internal/config"
 	"moviefinder/internal/delfan"
 	"moviefinder/internal/download"
+	"moviefinder/internal/mysubs"
 	"moviefinder/internal/opensubtitles"
 	"moviefinder/internal/stream"
 )
@@ -87,10 +88,14 @@ type UI struct {
 	app    fyne.App
 	window fyne.Window
 
-	cfg       config.Config
-	client    *api.Client
-	delfan    *delfan.Client
+	cfg    config.Config
+	client *api.Client
+	delfan *delfan.Client
+	// Two subtitle sources: OpenSubtitles matches by IMDb id but rations
+	// anonymous downloads, MySubs scrapes by title with no such cap. Which one
+	// a search uses is picked per dialog, defaulting to cfg.SubtitleProvider.
 	subtitles *opensubtitles.Client
+	mysubs    *mysubs.Client
 	images    *imageCache
 
 	// mu guards everything the loader goroutines write and the widget
@@ -196,6 +201,7 @@ func Run() {
 		client:    api.New(cfg),
 		delfan:    delfan.NewWithOptions(delfanOptions(cfg)),
 		subtitles: opensubtitles.New(opensubtitles.ResolveKey(cfg.OpenSubtitlesAPIKey)),
+		mysubs:    mysubs.New(cfg.MySubsBaseURL),
 		images:    newImageCache(),
 		source:    sourceMovieFinder,
 		sortMode:  sortDefault,
@@ -206,7 +212,7 @@ func Run() {
 	// the queue's worker goroutine, so it hops to the UI thread before touching
 	// any widget.
 	u.downloads = download.New(func() {
-		fyne.Do(u.refreshDownloads)
+		u.onUI("The downloads list", u.refreshDownloads)
 	})
 
 	w.SetContent(u.build())
@@ -433,7 +439,7 @@ func (u *UI) loadPoster(url string, apply func(fyne.Resource)) {
 		apply(res)
 		return
 	}
-	go func() {
+	u.bg("Loading a poster", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -444,8 +450,8 @@ func (u *UI) loadPoster(url string, apply func(fyne.Resource)) {
 		res := fyne.NewStaticResource(url, data)
 		u.images.put(url, res)
 
-		fyne.Do(func() { apply(res) })
-	}()
+		u.onUI("Loading a poster", func() { apply(res) })
+	})
 }
 
 func (u *UI) buildDetailPane() fyne.CanvasObject {
@@ -692,13 +698,13 @@ func (u *UI) reload(page int) {
 	}
 	u.loadingBar.Show()
 
-	go func() {
+	u.bg("Loading titles", func() {
 		movies, host, err := u.fetch(ctx, source, query, searching, castSearch, page)
 		if ctx.Err() != nil {
 			return // superseded by a newer request; that request owns the bar
 		}
 
-		fyne.Do(func() {
+		u.onUI("Loading titles", func() {
 			u.loadingBar.Hide()
 			u.hostLabel.SetText("Server: " + host)
 			if err != nil {
@@ -749,7 +755,7 @@ func (u *UI) reload(page int) {
 				u.setStatus(fmt.Sprintf("%d title(s).", len(movies)))
 			}
 		})
-	}()
+	})
 }
 
 // fetch pulls a page of titles from the active source and returns the human
@@ -814,13 +820,13 @@ func (u *UI) loadDetail(index int) {
 	u.clearDetail(movie.Title + "\n\nLoading…")
 	u.setDetailPoster(movie.PosterURL, movie.ThumbnailURL)
 
-	go func() {
+	u.bg("Loading details", func() {
 		detail, sub, err := u.fetchDetail(ctx, source, movie)
 		if ctx.Err() != nil {
 			return
 		}
 
-		fyne.Do(func() {
+		u.onUI("Loading details", func() {
 			if err != nil {
 				u.setInfo(movie.Title + "\n\nCould not load details: " + err.Error())
 				return
@@ -834,16 +840,19 @@ func (u *UI) loadDetail(index int) {
 
 			u.setDetailHeader(detail)
 			u.setInfo(renderDetail(detail))
-			if link := imdbLink(detail.IMDBID); link != "" {
+			// Only offer the link once the URL has actually parsed, so a
+			// malformed id leaves no link to tap rather than a dead one. IMDb
+			// itself being down changes nothing here: this is a link handed to
+			// the browser, never a request the app makes.
+			if link := imdbLink(detail.IMDBID); link != "" && u.imdbLink.SetURLFromString(link) == nil {
 				u.imdbLink.SetText("View on IMDb")
-				_ = u.imdbLink.SetURLFromString(link)
 				u.imdbLink.Show()
 			} else {
 				u.imdbLink.Hide()
 			}
 			u.showDetailContent(detail)
 		})
-	}()
+	})
 }
 
 // subMeta is what the subtitle search needs, kept separate from the display
