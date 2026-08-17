@@ -24,7 +24,10 @@ import (
 type Server struct {
 	remoteURL string
 	savePath  string
-	client    *http.Client
+	// resumeFrom is how much of savePath is already on disk; 0 for a fresh
+	// download. See NewResuming.
+	resumeFrom int64
+	client     *http.Client
 
 	mu         sync.Mutex
 	cond       *sync.Cond
@@ -42,9 +45,28 @@ type Server struct {
 
 // New prepares a server that will download remoteURL to savePath.
 func New(remoteURL, savePath string) *Server {
+	return NewResuming(remoteURL, savePath, 0)
+}
+
+// NewResuming prepares a server that continues an interrupted download rather
+// than starting it again: it asks the host for the bytes after the first
+// resumeFrom and appends them to what savePath already holds.
+//
+// This is what makes pausing a queued download cheap. A paused transfer gives
+// its connection back so the next download can have it — the queue's whole
+// point is that only one is ever open — and picking it up again costs a range
+// request instead of the megabytes already on disk.
+//
+// Hosts that ignore Range are handled rather than trusted: begin restarts the
+// file from scratch if one answers 200 where 206 was asked for.
+func NewResuming(remoteURL, savePath string, resumeFrom int64) *Server {
+	if resumeFrom < 0 {
+		resumeFrom = 0
+	}
 	s := &Server{
-		remoteURL: remoteURL,
-		savePath:  savePath,
+		remoteURL:  remoteURL,
+		savePath:   savePath,
+		resumeFrom: resumeFrom,
 		// Untimed: a movie transfer far outruns any API timeout; cancellation
 		// is via context instead.
 		client: &http.Client{},
@@ -67,24 +89,57 @@ func (s *Server) begin(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "MovieFinder/0.1")
+	if s.resumeFrom > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", s.resumeFrom))
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("open stream: %w", err)
 	}
+
+	// A host that has nothing past resumeFrom to give says so with 416, which
+	// means the file on disk is already the whole thing.
+	if s.resumeFrom > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		resp.Body.Close()
+		cancel()
+		s.mu.Lock()
+		s.downloaded = s.resumeFrom
+		s.mu.Unlock()
+		s.total.Store(s.resumeFrom)
+		s.finish(nil)
+		return nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
 		cancel()
 		return fmt.Errorf("stream source answered %s", resp.Status)
 	}
-	s.total.Store(resp.ContentLength) // -1 when the host omits Content-Length
 
-	out, err := os.Create(s.savePath)
+	// 206 means the host honoured the range and the bytes arriving belong after
+	// what is already saved. Anything else — a 200 to a range request included
+	// — means it is sending the file from the top, so the partial file has to
+	// go. Appending in that case would produce a corrupt file that looks fine.
+	appending := s.resumeFrom > 0 && resp.StatusCode == http.StatusPartialContent
+
+	out, err := s.openSaveFile(appending)
 	if err != nil {
 		resp.Body.Close()
 		cancel()
-		return fmt.Errorf("create save file: %w", err)
+		return err
+	}
+
+	if appending {
+		s.mu.Lock()
+		s.downloaded = s.resumeFrom
+		s.mu.Unlock()
+		s.total.Store(totalFromContentRange(resp, s.resumeFrom))
+	} else {
+		s.mu.Lock()
+		s.downloaded = 0
+		s.mu.Unlock()
+		s.total.Store(resp.ContentLength) // -1 when the host omits Content-Length
 	}
 
 	// Guarded: this goroutine outlives the call, and a panic on it would take
@@ -95,6 +150,41 @@ func (s *Server) begin(ctx context.Context) error {
 		func(err error) { s.finish(err) },
 	)
 	return nil
+}
+
+// openSaveFile opens savePath to write into: appended to when continuing an
+// interrupted download, truncated when starting one.
+func (s *Server) openSaveFile(appending bool) (*os.File, error) {
+	if appending {
+		out, err := os.OpenFile(s.savePath, os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("reopen save file to continue: %w", err)
+		}
+		return out, nil
+	}
+	out, err := os.Create(s.savePath)
+	if err != nil {
+		return nil, fmt.Errorf("create save file: %w", err)
+	}
+	return out, nil
+}
+
+// totalFromContentRange reads the whole file's size out of a 206's
+// Content-Range header ("bytes 500-1499/1500"), since that response's own
+// Content-Length only covers the part being sent. Falls back to what is
+// already saved plus what is on its way.
+func totalFromContentRange(resp *http.Response, resumeFrom int64) int64 {
+	if header := resp.Header.Get("Content-Range"); header != "" {
+		if i := strings.LastIndex(header, "/"); i >= 0 {
+			if n, err := strconv.ParseInt(strings.TrimSpace(header[i+1:]), 10, 64); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	if resp.ContentLength >= 0 {
+		return resumeFrom + resp.ContentLength
+	}
+	return -1
 }
 
 // StartDownload downloads to the save file without starting the localhost

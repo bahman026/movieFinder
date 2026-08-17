@@ -72,6 +72,21 @@ The "one connection" constraint drives the whole design. `stream.Server` opens e
 
 Range requests are served from the save file, and a range that seeks past the current download point **blocks on the sync.Cond until those bytes arrive** rather than opening a second upstream connection (`TestRangeAheadOfDownloadBlocksThenServes`). The consequence, worth remembering: an `.mkv` whose seek index (Cues) is at the end makes a player request the tail first, which stalls playback until the download reaches it — inherent to single-connection sequential download, not a bug. The download keeps running after the player disconnects (so the saved file completes); `Stop` cancels it and is called when a new playback replaces the old one. Reader visibility relies on `os.File.Write` being visible to a separate `os.Open`+`ReadAt` handle without `fsync` — true within one process on Windows, so no expensive per-chunk sync.
 
+### The download queue and what pausing means (`internal/download`)
+
+One worker, one job at a time — the same single-connection rule `internal/stream` enforces, extended across a list. The part that is easy to get wrong is pausing.
+
+**A paused job gives its connection back.** `Pause` calls `Stop` on the transfer, clears `j.srv`, releases `q.active` and pokes the worker, so the next job starts immediately. It does *not* hold the connection open: the moment the next job started, that would be two. `Resume` puts the job back to `StateQueued` and a fresh `stream.Server` continues from `partialSize(savePath)` — the file on disk is the authority, since the last progress tick may lag what was written. `Hold`/`Release` (playback taking priority) work the same way, for the same reason.
+
+Note the asymmetry with the *play-along* stream in `ui/playback.go`: pausing **that** one does keep its connection open, via TCP backpressure. It is correct there — the player is attached and the pause is momentary — and wrong here, where a pause can last hours.
+
+Two consequences worth keeping in mind:
+
+- **`runJob` exits on `j.srv != srv`, not on the paused state.** `Resume` can flip the state back to `Queued` before the 500ms progress tick even fires; keying the exit off the state deadlocks the worker inside a run whose transfer is already stopped. That exact bug cost a debugging cycle — the detach check is the fix, and the error caused by stopping is deliberately not recorded as a failure.
+- **Resuming depends on the host honouring `Range`.** `stream.NewResuming` sends `bytes=N-` and appends only on a `206`; a `200` means the host is sending from the top, so the partial file is truncated and restarted rather than appended to, which would silently corrupt it. `416` means there is nothing past `N`, i.e. the file is already complete, and finishes cleanly.
+
+`MoveUp`/`MoveDown` swap adjacent entries in `q.jobs`, which is the order `takeNext` scans, so reordering chooses what runs next without preempting what is running. Pausing a `StateQueued` job is allowed and simply makes it ineligible — "paused" means "not a candidate", whether or not it ever started.
+
 ### The API and its two quirks
 
 Base path `/playstore/api`; `api_secret_key`, `version`, `country` and `sp` go on every request (`Client.commonParams`). Endpoints in use: `get_movies?page=`, `search?q=`, `get_single_details?type=&id=`, `get_movie_by_genre_id?id=&page=`, `get_slider`.

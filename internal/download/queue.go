@@ -14,6 +14,7 @@ package download
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -99,16 +100,19 @@ type Queue struct {
 	onChange func()
 	// newServer is swapped in tests so the queue can be exercised without a
 	// real network transfer.
-	newServer func(url, savePath string) downloader
+	newServer func(url, savePath string, resumeFrom int64) downloader
 }
 
 // downloader is the slice of stream.Server the queue depends on, named so tests
 // can substitute a fake.
+//
+// There is deliberately no Pause here. A paused job in this queue gives its
+// connection back rather than holding it open — that is what lets the next
+// download start — so pausing is Stop, and resuming is a fresh downloader that
+// picks up where the file on disk leaves off.
 type downloader interface {
 	StartDownload(ctx context.Context) error
 	Progress() (downloaded, total int64, done bool, err error)
-	Pause()
-	Resume()
 	Stop()
 }
 
@@ -119,8 +123,8 @@ func New(onChange func()) *Queue {
 	q := &Queue{
 		wake:     make(chan struct{}, 1),
 		onChange: onChange,
-		newServer: func(url, savePath string) downloader {
-			return stream.New(url, savePath)
+		newServer: func(url, savePath string, resumeFrom int64) downloader {
+			return stream.NewResuming(url, savePath, resumeFrom)
 		},
 	}
 	go q.run()
@@ -175,27 +179,44 @@ func (q *Queue) Counts() (active, queued, done int) {
 	return active, queued, done
 }
 
-// Pause suspends a job. A queued job that has not started yet is left alone —
-// there is nothing to suspend, and cancelling is the meaningful action there.
+// Pause suspends a job and hands the connection to whatever is waiting behind
+// it. A job that has not started yet can be paused too: it then simply keeps
+// its place in the list without being eligible to run.
+//
+// Pausing the running job STOPS its transfer rather than holding the
+// connection open. Holding it would mean two open connections as soon as the
+// next job started, which is the one thing this package exists to prevent.
+// What was already written stays on disk, and Resume continues from there.
 func (q *Queue) Pause(id int) {
 	q.mu.Lock()
 	j := q.find(id)
-	if j == nil || j.state != StateDownloading {
+	if j == nil || (j.state != StateDownloading && j.state != StateQueued) {
 		q.mu.Unlock()
 		return
 	}
 	j.userPaused = true
 	j.state = StatePaused
+
 	srv := j.srv
+	j.srv = nil
+	freed := q.active == j
+	if freed {
+		q.active = nil
+	}
 	q.mu.Unlock()
 
 	if srv != nil {
-		srv.Pause()
+		srv.Stop()
 	}
 	q.notify()
+	if freed {
+		q.poke() // let the next job have the connection
+	}
 }
 
-// Resume continues a job the user paused.
+// Resume puts a paused job back in line. It starts when the worker reaches it
+// — immediately if nothing else is running — and continues from the bytes
+// already on disk rather than starting the file again.
 func (q *Queue) Resume(id int) {
 	q.mu.Lock()
 	j := q.find(id)
@@ -212,14 +233,43 @@ func (q *Queue) Resume(id int) {
 		q.notify()
 		return
 	}
-	j.state = StateDownloading
-	srv := j.srv
+	j.autoPaused = false
+	j.state = StateQueued
 	q.mu.Unlock()
 
-	if srv != nil {
-		srv.Resume()
-	}
 	q.notify()
+	q.poke()
+}
+
+// MoveUp moves a job one place towards the front of the queue, and MoveDown
+// one place towards the back. The list order is the order the worker takes
+// jobs in, so this is how the next download is chosen. Neither interrupts
+// whatever is already running — reordering decides what goes next, and pausing
+// the running job is what makes "next" happen now.
+func (q *Queue) MoveUp(id int) bool { return q.move(id, -1) }
+
+// MoveDown moves a job one place towards the back of the queue.
+func (q *Queue) MoveDown(id int) bool { return q.move(id, +1) }
+
+func (q *Queue) move(id, delta int) bool {
+	q.mu.Lock()
+	moved := false
+	for i, j := range q.jobs {
+		if j.id != id {
+			continue
+		}
+		if swap := i + delta; swap >= 0 && swap < len(q.jobs) {
+			q.jobs[i], q.jobs[swap] = q.jobs[swap], q.jobs[i]
+			moved = true
+		}
+		break // found it, whether or not it could move
+	}
+	q.mu.Unlock()
+
+	if moved {
+		q.notify()
+	}
+	return moved
 }
 
 // Cancel stops a job, whether it is running or still waiting. The partial file
@@ -289,17 +339,22 @@ func (q *Queue) Hold() {
 		j.autoPaused = true
 		j.state = StatePaused
 		srv = j.srv
+		j.srv = nil
+		q.active = nil
 	}
 	q.mu.Unlock()
 
+	// Stopped, not merely paused: playback is about to open its own connection,
+	// and a suspended-but-open one beside it would be the second.
 	if srv != nil {
-		srv.Pause()
+		srv.Stop()
 	}
 	q.notify()
 }
 
-// Release gives the connection back to the queue and resumes whatever Hold
-// suspended. A job the user paused by hand stays paused.
+// Release gives the connection back to the queue and re-queues whatever Hold
+// suspended, which continues from the bytes already saved. A job the user
+// paused by hand stays paused.
 func (q *Queue) Release() {
 	q.mu.Lock()
 	if !q.held {
@@ -307,19 +362,17 @@ func (q *Queue) Release() {
 		return
 	}
 	q.held = false
-	var srv downloader
-	if j := q.active; j != nil && j.autoPaused {
+	for _, j := range q.jobs {
+		if !j.autoPaused {
+			continue
+		}
 		j.autoPaused = false
-		if !j.userPaused {
-			j.state = StateDownloading
-			srv = j.srv
+		if !j.userPaused && j.state == StatePaused {
+			j.state = StateQueued
 		}
 	}
 	q.mu.Unlock()
 
-	if srv != nil {
-		srv.Resume()
-	}
 	q.notify()
 	q.poke()
 }
@@ -407,7 +460,9 @@ func (q *Queue) takeNext() *job {
 // runJob downloads one file and returns only once it has finished, failed or
 // been cancelled.
 func (q *Queue) runJob(j *job) {
-	srv := q.newServer(j.url, j.savePath)
+	// The file on disk is the authority on how much was already fetched: a
+	// previous attempt may have written more than the last progress tick saw.
+	srv := q.newServer(j.url, j.savePath, partialSize(j.savePath))
 
 	q.mu.Lock()
 	j.srv = srv
@@ -433,6 +488,17 @@ func (q *Queue) runJob(j *job) {
 		if j.state == StateCanceled {
 			q.mu.Unlock()
 			q.clearActive(j)
+			return
+		}
+		// Pause and Hold stop the transfer and clear j.srv, having already
+		// handed the slot on. Detaching is what ends this run — not the paused
+		// state, which Resume may have flipped back before this tick even
+		// arrived. The error that stopping caused is not a failure, and the
+		// byte count is kept because it is where the next attempt starts.
+		if j.srv != srv {
+			j.downloaded = downloaded
+			q.mu.Unlock()
+			q.notify()
 			return
 		}
 		j.downloaded, j.total = downloaded, total
@@ -461,6 +527,16 @@ func (q *Queue) clearActive(j *job) {
 	}
 	q.mu.Unlock()
 	q.poke()
+}
+
+// partialSize is how much of a save file is already on disk, and so where a
+// resumed download continues from. A missing file means starting over.
+func partialSize(savePath string) int64 {
+	info, err := os.Stat(savePath)
+	if err != nil || info.IsDir() {
+		return 0
+	}
+	return info.Size()
 }
 
 func (q *Queue) find(id int) *job {

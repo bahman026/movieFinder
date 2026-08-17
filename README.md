@@ -73,13 +73,26 @@ The Play dialog's **Download while playing (save a copy)** option — on by defa
 
 When you play *with* a subtitle and are saving a copy, the subtitle is written next to the movie with the **same name** (`Movie.mkv` → `Movie.srt`), so when the download finishes you have a matching pair that any player auto-associates.
 
+### The download queue
+
+**Download** on a link adds it to the queue, reachable from the toolbar button that shows how many are outstanding. One file downloads at a time — the same single-connection rule the whole app keeps — and each row has its own controls:
+
+- **Pause** on the running download stops it and **the next in line starts straight away**. The bytes already fetched stay on disk, and **Resume** continues from exactly there via a range request rather than fetching them again. A resumed job rejoins the queue and starts when the worker reaches it.
+- **Pause** on a download that has not started yet holds it back, so the queue skips over it and takes the next one instead.
+- **↑ / ↓** reorder the list, which is the order the queue takes jobs in. Reordering never interrupts what is already running — it decides what goes next.
+- **Cancel** stops a download and leaves the partial file; **Remove** clears a finished row, and **Clear finished** clears them all.
+
+Playback still takes priority: starting a stream pauses the running download and hands it the connection, and stopping playback puts the download back in line where it left off.
+
+One caveat, inherent to resuming over HTTP: continuing needs the host to honour a range request. Hosts here do, but if one ignores it and sends the file from the top, the partial file is discarded and the download starts over rather than producing a corrupt file. Signed links also expire, so a download left paused for a long time may need re-fetching from the detail page.
+
 ### The Delfan source
 
 A second movie catalogue on a separate set of servers, browsed and searched the same way as the primary source — pick **Delfan** in the toolbar dropdown. Browse shows the app's home page (newly added movies and series); search returns matches; the detail pane lists each quality's download link (which resolves to the real, signed file when opened). **Find Subtitles** works here too, and searches OpenSubtitles by the film's English title, which the client parses out of the Persian description.
 
 Its API signs every request, so the client logs in, seeds a rolling per-request nonce, and threads that nonce through each call automatically — see `internal/delfan` and the architecture notes in CLAUDE.md. The two hosts rotate occasionally; if the source stops working, override them under `Settings → Delfan API host`.
 
-The app does not download the movie files themselves; it surfaces the links for you to hand to whatever downloader you prefer. Subtitles are the one thing it does download directly, since they're small and the whole point is to save one next to the video.
+Links from this source work with the download queue and the player just as the primary source's do.
 
 ### Subtitles
 

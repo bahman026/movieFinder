@@ -54,8 +54,10 @@ func (u *UI) showDownloads() {
 
 	header := container.NewVBox(
 		widget.NewLabelWithStyle("Downloads", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("One file downloads at a time. Playback takes priority: a "+
-			"download pauses while you stream and resumes when you stop."),
+		widget.NewLabel("One file downloads at a time. Pause the running one and the next "+
+			"in line starts immediately; resuming continues from where it stopped, and the "+
+			"arrows change what goes next. Playback takes priority: a download pauses while "+
+			"you stream and resumes when you stop."),
 		container.NewHBox(clearButton),
 		widget.NewSeparator(),
 	)
@@ -107,15 +109,16 @@ func (u *UI) refreshDownloads() {
 		u.downloadsBox.Refresh()
 		return
 	}
-	for _, job := range jobs {
-		u.downloadsBox.Add(u.downloadRow(job))
+	for i, job := range jobs {
+		u.downloadsBox.Add(u.downloadRow(job, i, len(jobs)))
 	}
 	u.downloadsBox.Refresh()
 }
 
 // downloadRow renders one queue entry: what it is, how far along, and the
-// actions that apply to the state it is in.
-func (u *UI) downloadRow(job download.Snapshot) fyne.CanvasObject {
+// actions that apply to the state it is in. index and count place it in the
+// list, which is what decides whether it can be moved up or down.
+func (u *UI) downloadRow(job download.Snapshot, index, count int) fyne.CanvasObject {
 	title := widget.NewLabelWithStyle(job.Title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
 	bar := widget.NewProgressBar()
@@ -130,8 +133,25 @@ func (u *UI) downloadRow(job download.Snapshot) fyne.CanvasObject {
 	status.Wrapping = fyne.TextWrapWord
 
 	var actions []fyne.CanvasObject
+
+	// Reordering only means something for a job that has yet to run: it picks
+	// what the queue takes next.
+	if !job.State.Done() {
+		up := widget.NewButtonWithIcon("", theme.MoveUpIcon(), func() { u.downloads.MoveUp(job.ID) })
+		down := widget.NewButtonWithIcon("", theme.MoveDownIcon(), func() { u.downloads.MoveDown(job.ID) })
+		if index == 0 {
+			up.Disable()
+		}
+		if index == count-1 {
+			down.Disable()
+		}
+		actions = append(actions, up, down)
+	}
+
 	switch job.State {
-	case download.StateDownloading:
+	case download.StateDownloading, download.StateQueued:
+		// Pausing what is waiting holds it back; pausing what is running hands
+		// the connection to whatever is next.
 		actions = append(actions, widget.NewButtonWithIcon("Pause", theme.MediaPauseIcon(), func() {
 			u.downloads.Pause(job.ID)
 		}))
@@ -171,7 +191,10 @@ func describeJob(job download.Snapshot) string {
 	case download.StateDownloading:
 		return fmt.Sprintf("Downloading %s — %s", progressPercent(job.Downloaded, job.Total), name)
 	case download.StatePaused:
-		return fmt.Sprintf("Paused at %s — %s", progressPercent(job.Downloaded, job.Total), name)
+		// Worth spelling out: the bytes so far are kept, and resuming picks up
+		// from them rather than starting the file again.
+		return fmt.Sprintf("Paused at %s, continues from here — %s",
+			progressPercent(job.Downloaded, job.Total), name)
 	case download.StateDone:
 		return "Saved to " + job.SavePath
 	case download.StateFailed:

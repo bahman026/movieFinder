@@ -307,6 +307,147 @@ func TestParseRange(t *testing.T) {
 	}
 }
 
+// rangeServer serves content, honouring a Range request the way a well-behaved
+// file host does, and reports what range it was asked for.
+func rangeServer(t *testing.T, content []byte, gotRange *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Range")
+		if gotRange != nil {
+			*gotRange = header
+		}
+		if header == "" {
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(content)
+			return
+		}
+
+		var from int64
+		if _, err := fmt.Sscanf(header, "bytes=%d-", &from); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if from >= int64(len(content)) {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, len(content)-1, len(content)))
+		w.Header().Set("Content-Length", fmt.Sprint(int64(len(content))-from))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(content[from:])
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Pausing a queued download stops the transfer, so resuming has to ask for the
+// rest and append it. Refetching from the top would make pausing expensive
+// enough not to be worth offering.
+func TestResumeFetchesOnlyTheMissingBytes(t *testing.T) {
+	content := makeContent(300_000)
+	const already = 120_000
+
+	var askedFor string
+	upstream := rangeServer(t, content, &askedFor)
+
+	save := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(save, content[:already], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewResuming(upstream.URL, save, already)
+	if err := s.StartDownload(context.Background()); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+	waitDone(t, s)
+
+	if askedFor != fmt.Sprintf("bytes=%d-", already) {
+		t.Errorf("Range header = %q, want a request for the bytes after %d", askedFor, already)
+	}
+
+	saved, err := os.ReadFile(save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(saved) != string(content) {
+		t.Fatalf("resumed file is %d bytes and does not match the source (want %d)", len(saved), len(content))
+	}
+
+	// Progress counts the whole file, not just this leg of it.
+	downloaded, total, _, _ := s.Progress()
+	if downloaded != int64(len(content)) {
+		t.Errorf("downloaded = %d, want %d", downloaded, len(content))
+	}
+	if total != int64(len(content)) {
+		t.Errorf("total = %d, want the whole file %d", total, len(content))
+	}
+}
+
+// Not every host honours Range. One that answers 200 is sending the file from
+// the top, so the partial file has to be replaced — appending would build a
+// corrupt file that still looks plausible.
+func TestHostIgnoringRangeStartsTheFileOver(t *testing.T) {
+	content := makeContent(50_000)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		w.WriteHeader(http.StatusOK) // Range ignored
+		w.Write(content)
+	}))
+	defer upstream.Close()
+
+	save := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(save, makeContent(20_000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewResuming(upstream.URL, save, 20_000)
+	if err := s.StartDownload(context.Background()); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+	waitDone(t, s)
+
+	saved, err := os.ReadFile(save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(saved) != string(content) {
+		t.Fatalf("saved file is %d bytes, want the whole file %d with no leftover prefix", len(saved), len(content))
+	}
+}
+
+// Resuming a file that turns out to be complete: the host has nothing past the
+// offset and says so with 416, which is success, not failure.
+func TestResumingACompleteFileFinishesImmediately(t *testing.T) {
+	content := makeContent(10_000)
+	upstream := rangeServer(t, content, nil)
+
+	save := filepath.Join(t.TempDir(), "movie.mkv")
+	if err := os.WriteFile(save, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewResuming(upstream.URL, save, int64(len(content)))
+	if err := s.StartDownload(context.Background()); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+	waitDone(t, s)
+
+	downloaded, total, done, err := s.Progress()
+	if !done || err != nil {
+		t.Fatalf("done = %v, err = %v; want a clean finish", done, err)
+	}
+	if downloaded != int64(len(content)) || total != int64(len(content)) {
+		t.Errorf("downloaded/total = %d/%d, want %d/%[3]d", downloaded, total, len(content))
+	}
+
+	saved, _ := os.ReadFile(save)
+	if string(saved) != string(content) {
+		t.Error("the already-complete file was modified")
+	}
+}
+
 func waitDone(t *testing.T, s *Server) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

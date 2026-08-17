@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -17,10 +18,12 @@ import (
 type fakeDownloader struct {
 	tracker *tracker
 	name    string
+	// resumeFrom is what the queue said was already on disk when it built this
+	// downloader — the difference between continuing and starting over.
+	resumeFrom int64
 
 	mu       sync.Mutex
 	started  bool
-	paused   bool
 	stopped  bool
 	done     bool
 	ended    bool // connection closed; guards a double decrement
@@ -97,9 +100,6 @@ func (f *fakeDownloader) Progress() (int64, int64, bool, error) {
 	return f.progress, 100, f.done, f.err
 }
 
-func (f *fakeDownloader) Pause()  { f.mu.Lock(); f.paused = true; f.mu.Unlock() }
-func (f *fakeDownloader) Resume() { f.mu.Lock(); f.paused = false; f.mu.Unlock() }
-
 func (f *fakeDownloader) Stop() {
 	f.mu.Lock()
 	f.stopped = true
@@ -119,12 +119,6 @@ func (f *fakeDownloader) fail(err error) {
 	f.err = err
 	f.mu.Unlock()
 	f.endOnce()
-}
-
-func (f *fakeDownloader) isPaused() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.paused
 }
 
 func (f *fakeDownloader) wasStopped() bool {
@@ -150,7 +144,7 @@ func newTestQueueWith(t *testing.T, special func(url string) downloader) (*Queue
 	fakes := map[string]*fakeDownloader{}
 
 	q := &Queue{wake: make(chan struct{}, 1)}
-	q.newServer = func(url, savePath string) downloader {
+	q.newServer = func(url, savePath string, resumeFrom int64) downloader {
 		if special != nil {
 			if d := special(url); d != nil {
 				return d
@@ -158,7 +152,9 @@ func newTestQueueWith(t *testing.T, special func(url string) downloader) (*Queue
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		f := &fakeDownloader{tracker: tr, name: url}
+		// A resumed job builds a second downloader for the same URL; the newest
+		// is the live one, which is what a test wants to look at.
+		f := &fakeDownloader{tracker: tr, name: url, resumeFrom: resumeFrom}
 		fakes[url] = f
 		return f
 	}
@@ -300,18 +296,157 @@ func TestPauseAndResumeRunningJob(t *testing.T) {
 	q, _, get := newTestQueue(t)
 	id := q.Add("A", "url-a", "/tmp/a")
 	waitFor(t, "job to start", func() bool { return get("url-a") != nil })
+	first := get("url-a")
 
 	q.Pause(id)
 	waitFor(t, "job to pause", func() bool { return stateOf(q, id) == StatePaused })
-	if !get("url-a").isPaused() {
-		t.Error("pause did not reach the downloader")
+
+	// Pausing gives the connection back rather than holding it open — that is
+	// what frees the queue to run something else.
+	if !first.wasStopped() {
+		t.Error("pause left the upstream connection open")
 	}
 
 	q.Resume(id)
 	waitFor(t, "job to resume", func() bool { return stateOf(q, id) == StateDownloading })
-	if get("url-a").isPaused() {
-		t.Error("resume did not reach the downloader")
+	if get("url-a") == first {
+		t.Error("resume reused the stopped downloader instead of opening a fresh one")
 	}
+}
+
+// The bug this behaviour was reported for: pause the first download and the
+// second one just sat there, because the paused job still held the slot.
+func TestPausingTheRunningJobStartsTheNextOne(t *testing.T) {
+	q, tr, get := newTestQueue(t)
+
+	first := q.Add("A", "url-a", "/tmp/a")
+	second := q.Add("B", "url-b", "/tmp/b")
+	waitFor(t, "the first job to start", func() bool { return get("url-a") != nil })
+
+	if get("url-b") != nil {
+		t.Fatal("the second job started while the first was still running")
+	}
+
+	q.Pause(first)
+
+	waitFor(t, "the second job to start once the first paused", func() bool {
+		return get("url-b") != nil
+	})
+	if got := stateOf(q, first); got != StatePaused {
+		t.Errorf("first job state = %v, want Paused", got)
+	}
+	if got := stateOf(q, second); got != StateDownloading {
+		t.Errorf("second job state = %v, want Downloading", got)
+	}
+	// Still one connection at a time: the paused one gave its up.
+	if got := tr.peak(); got != 1 {
+		t.Errorf("peak concurrent downloads = %d, want 1", got)
+	}
+}
+
+// Resuming continues from the bytes already saved instead of fetching them
+// again, which is what makes pausing cheap enough to be worth offering.
+func TestResumeContinuesFromWhatIsAlreadyOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	savePath := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(savePath, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q, _, get := newTestQueue(t)
+	id := q.Add("A", "url-a", savePath)
+	waitFor(t, "job to start", func() bool { return get("url-a") != nil })
+
+	if got := get("url-a").resumeFrom; got != 4096 {
+		t.Errorf("resumeFrom = %d, want the 4096 bytes already on disk", got)
+	}
+
+	q.Pause(id)
+	waitFor(t, "job to pause", func() bool { return stateOf(q, id) == StatePaused })
+
+	// More arrived before it stopped.
+	if err := os.WriteFile(savePath, make([]byte, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	q.Resume(id)
+	waitFor(t, "job to restart", func() bool {
+		f := get("url-a")
+		return f != nil && f.resumeFrom == 8192
+	})
+}
+
+// Reordering decides what the queue takes next.
+func TestMoveChangesWhatRunsNext(t *testing.T) {
+	q, _, get := newTestQueue(t)
+
+	running := q.Add("A", "url-a", "/tmp/a")
+	q.Add("B", "url-b", "/tmp/b")
+	last := q.Add("C", "url-c", "/tmp/c")
+	waitFor(t, "the first job to start", func() bool { return get("url-a") != nil })
+
+	// Move C ahead of B, so it is next when A finishes.
+	if !q.MoveUp(last) {
+		t.Fatal("MoveUp reported nothing moved")
+	}
+	if order := jobTitles(q); order[1] != "C" || order[2] != "B" {
+		t.Fatalf("order after MoveUp = %v, want A, C, B", order)
+	}
+
+	get("url-a").complete()
+	waitFor(t, "job A to finish", func() bool { return stateOf(q, running) == StateDone })
+	waitFor(t, "C to run before B", func() bool { return get("url-c") != nil })
+
+	if get("url-b") != nil {
+		t.Error("B started even though C was moved ahead of it")
+	}
+}
+
+func TestMoveAtTheEndOfTheListDoesNothing(t *testing.T) {
+	q, _, _ := newTestQueue(t)
+	first := q.Add("A", "url-a", "/tmp/a")
+	last := q.Add("B", "url-b", "/tmp/b")
+
+	if q.MoveUp(first) {
+		t.Error("MoveUp moved the job that is already first")
+	}
+	if q.MoveDown(last) {
+		t.Error("MoveDown moved the job that is already last")
+	}
+	if q.MoveUp(9999) {
+		t.Error("MoveUp reported a move for an id that is not in the queue")
+	}
+}
+
+// A job can be held back before it ever starts, which is the other half of
+// choosing what runs next.
+func TestPausingAQueuedJobKeepsItFromStarting(t *testing.T) {
+	q, _, get := newTestQueue(t)
+
+	first := q.Add("A", "url-a", "/tmp/a")
+	skipped := q.Add("B", "url-b", "/tmp/b")
+	q.Add("C", "url-c", "/tmp/c")
+	waitFor(t, "the first job to start", func() bool { return get("url-a") != nil })
+
+	q.Pause(skipped)
+	if got := stateOf(q, skipped); got != StatePaused {
+		t.Fatalf("queued job state = %v, want Paused", got)
+	}
+
+	get("url-a").complete()
+	waitFor(t, "job A to finish", func() bool { return stateOf(q, first) == StateDone })
+	waitFor(t, "the queue to skip past the paused job", func() bool { return get("url-c") != nil })
+
+	if get("url-b") != nil {
+		t.Error("a paused job was started")
+	}
+}
+
+func jobTitles(q *Queue) []string {
+	var titles []string
+	for _, s := range q.Jobs() {
+		titles = append(titles, s.Title)
+	}
+	return titles
 }
 
 // Playback owns the one connection: Hold suspends the running job, Release
@@ -321,10 +456,14 @@ func TestHoldSuspendsForPlaybackAndReleaseResumes(t *testing.T) {
 	id := q.Add("A", "url-a", "/tmp/a")
 	waitFor(t, "job to start", func() bool { return get("url-a") != nil })
 
+	held := get("url-a")
 	q.Hold()
 	waitFor(t, "job to be held", func() bool { return stateOf(q, id) == StatePaused })
-	if !get("url-a").isPaused() {
-		t.Error("hold did not pause the transfer")
+
+	// Playback is about to open its own connection, so the held job has to give
+	// its up rather than keep it suspended.
+	if !held.wasStopped() {
+		t.Error("hold left the upstream connection open next to playback's")
 	}
 
 	// Nothing new may start while playback holds the connection.
@@ -336,8 +475,8 @@ func TestHoldSuspendsForPlaybackAndReleaseResumes(t *testing.T) {
 
 	q.Release()
 	waitFor(t, "job to resume", func() bool { return stateOf(q, id) == StateDownloading })
-	if get("url-a").isPaused() {
-		t.Error("release did not resume the transfer")
+	if get("url-a") == held {
+		t.Error("release reused the stopped downloader instead of continuing with a fresh one")
 	}
 }
 
@@ -349,6 +488,7 @@ func TestReleaseLeavesUserPausedJobPaused(t *testing.T) {
 
 	q.Pause(id)
 	waitFor(t, "user pause", func() bool { return stateOf(q, id) == StatePaused })
+	paused := get("url-a")
 
 	q.Hold()
 	q.Release()
@@ -357,8 +497,8 @@ func TestReleaseLeavesUserPausedJobPaused(t *testing.T) {
 	if got := stateOf(q, id); got != StatePaused {
 		t.Errorf("state after release = %v, want it to stay Paused", got)
 	}
-	if !get("url-a").isPaused() {
-		t.Error("release resumed a job the user had paused")
+	if get("url-a") != paused {
+		t.Error("release restarted a job the user had paused")
 	}
 }
 
