@@ -163,6 +163,13 @@ type UI struct {
 	downloadsBox    *fyne.Container // rows, populated only while the dialog is open
 	downloadsDialog dialog.Dialog
 
+	// Status-bar readout for the running queue job, so progress is visible
+	// without opening the dialog. Hidden whenever nothing is downloading.
+	queueProgress      *fyne.Container
+	queueProgressBar   *widget.ProgressBar
+	queueProgressWrap  *fyne.Container // fixed-size holder, hidden when the size is unknown
+	queueProgressLabel *widget.Label
+
 	// activeStream is the current download-while-playing server, if any. A new
 	// playback stops the previous one.
 	activeStream *stream.Server
@@ -366,11 +373,22 @@ func (u *UI) build() fyne.CanvasObject {
 	u.dlControls = container.NewHBox(u.pauseButton, u.cancelBtn)
 	u.dlControls.Hide()
 
-	// Single-row status bar: status text on the left, server + download
-	// controls + pager on the right. One line keeps it compact.
+	// Queue progress, on the status bar so a running download is visible from
+	// anywhere in the app. The bar draws its own "42%"; the label carries the
+	// byte counts and how many jobs are still waiting. Fixed width, or the
+	// bar's own minimum would stretch it across the row.
+	u.queueProgressBar = widget.NewProgressBar()
+	u.queueProgressBar.Min, u.queueProgressBar.Max = 0, 1
+	u.queueProgressWrap = container.NewGridWrap(fyne.NewSize(110, 20), u.queueProgressBar)
+	u.queueProgressLabel = widget.NewLabel("")
+	u.queueProgress = container.NewHBox(u.queueProgressWrap, u.queueProgressLabel)
+	u.queueProgress.Hide()
+
+	// Single-row status bar: status text on the left, queue progress + server +
+	// download controls + pager on the right. One line keeps it compact.
 	statusBar := container.NewBorder(nil, nil,
 		u.status,
-		container.NewHBox(u.hostLabel, u.dlControls, u.pagerBox),
+		container.NewHBox(u.queueProgress, u.hostLabel, u.dlControls, u.pagerBox),
 		nil,
 	)
 	bottom := container.NewVBox(widget.NewSeparator(), statusBar)

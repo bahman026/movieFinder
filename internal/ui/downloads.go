@@ -98,12 +98,14 @@ func (u *UI) refreshDownloads() {
 		}
 	}
 
+	jobs := u.downloads.Jobs()
+	u.updateQueueProgress(jobs, queued)
+
 	if u.downloadsBox == nil {
 		return // dialog closed; nothing to draw
 	}
 
 	u.downloadsBox.RemoveAll()
-	jobs := u.downloads.Jobs()
 	if len(jobs) == 0 {
 		u.downloadsBox.Add(widget.NewLabel("No downloads yet. Use the Download button on any link."))
 		u.downloadsBox.Refresh()
@@ -207,4 +209,54 @@ func describeJob(job download.Snapshot) string {
 		return "Canceled — partial file left at " + job.SavePath
 	}
 	return name
+}
+
+// updateQueueProgress drives the status-bar readout. Only a running transfer is
+// shown: a paused or waiting job is already reported by the count on the
+// toolbar button, and leaving a frozen bar on the status bar would read as a
+// stalled download. queued excludes the running job, so it is the number still
+// behind it.
+func (u *UI) updateQueueProgress(jobs []download.Snapshot, queued int) {
+	if u.queueProgress == nil {
+		return // status bar not built yet
+	}
+
+	var running *download.Snapshot
+	for i := range jobs {
+		if jobs[i].State == download.StateDownloading {
+			running = &jobs[i]
+			break
+		}
+	}
+	if running == nil {
+		u.queueProgress.Hide()
+		return
+	}
+
+	// Total is -1 when the host sends no length, and the percentage is then
+	// unknowable — show the bytes alone rather than a bar pinned at zero.
+	if running.Total > 0 {
+		u.queueProgressBar.SetValue(float64(running.Downloaded) / float64(running.Total))
+		u.queueProgressWrap.Show()
+	} else {
+		u.queueProgressWrap.Hide()
+	}
+
+	u.queueProgressLabel.SetText(queueProgressText(*running, queued))
+	u.queueProgress.Show()
+}
+
+// queueProgressText is the wording beside the status-bar progress bar: the byte
+// counts the bar's own percentage cannot carry, plus what is still waiting.
+func queueProgressText(job download.Snapshot, queued int) string {
+	var text string
+	if job.Total > 0 {
+		text = fmt.Sprintf("%s / %s", humanBytes(job.Downloaded), humanBytes(job.Total))
+	} else {
+		text = humanBytes(job.Downloaded) + " downloaded"
+	}
+	if queued > 0 {
+		text += fmt.Sprintf("  (+%d waiting)", queued)
+	}
+	return text
 }
