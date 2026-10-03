@@ -122,7 +122,9 @@ func (u *UI) playLink(videoURL, linkLabel string) {
 }
 
 // playSubtitleRow renders one subtitle with a "Play with this" button that
-// downloads the subtitle bytes, then hands them to doPlay.
+// downloads the subtitle bytes, then hands them to doPlay, and a "Download"
+// button that only saves the subtitle wherever the user picks, leaving the
+// Play dialog open.
 func (u *UI) playSubtitleRow(sub subtitleHit, doPlay func(subData []byte, subName string)) fyne.CanvasObject {
 	titleLabel := widget.NewLabelWithStyle(sub.title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
@@ -155,8 +157,11 @@ func (u *UI) playSubtitleRow(sub subtitleHit, doPlay func(subData []byte, subNam
 		})
 	}
 
+	downloadButton := widget.NewButtonWithIcon("Download", theme.DownloadIcon(), nil)
+	downloadButton.OnTapped = func() { u.downloadSubtitle(sub, downloadButton) }
+
 	return container.NewVBox(
-		container.NewBorder(nil, nil, nil, playButton, titleLabel),
+		container.NewBorder(nil, nil, nil, container.NewHBox(downloadButton, playButton), titleLabel),
 		release,
 		metaLabel,
 		widget.NewSeparator(),
