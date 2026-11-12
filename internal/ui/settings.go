@@ -69,6 +69,9 @@ func (u *UI) showSettings() {
 	delfanAppVersion := entryWith(cfg.DelfanAppVersion, delfan.DefaultAppVersion+" (default)")
 
 	playerPath := entryWith(cfg.PlayerPath, "auto-detect (PotPlayer, mpv, VLC, MPC-HC)")
+	ffmpegPath := entryWith(cfg.FFmpegPath, "auto-detect (PATH, C:\\ffmpeg\\bin, winget, Chocolatey, Scoop)")
+	autoSubs := widget.NewCheck("After a download finishes, add English and Persian subtitles to the file", nil)
+	autoSubs.SetChecked(cfg.AutoSubtitles)
 
 	// collect turns the current field values into a Config.
 	collect := func() config.Config {
@@ -99,6 +102,8 @@ func (u *UI) showSettings() {
 		next.DelfanAPIKey = strings.TrimSpace(delfanAPIKey.Text)
 		next.DelfanAppVersion = strings.TrimSpace(delfanAppVersion.Text)
 		next.PlayerPath = strings.TrimSpace(playerPath.Text)
+		next.FFmpegPath = strings.TrimSpace(ffmpegPath.Text)
+		next.AutoSubtitles = autoSubs.Checked
 		if n, err := strconv.Atoi(timeout.Text); err == nil && n > 0 {
 			next.TimeoutSeconds = n
 		}
@@ -197,6 +202,8 @@ func (u *UI) showSettings() {
 		{Text: "Default source", Widget: subtitleSource, HintText: "Both sources stay selectable in the Subtitles and Play dialogs; this is only the one they open on."},
 		{Text: "OpenSubtitles key", Widget: subtitlesKey, HintText: "Optional — overrides the built-in key. Get your own at " + opensubtitles.RegisterURL},
 		{Text: "MySubs address", Widget: mysubsHost, HintText: "Blank uses " + mysubs.DefaultBaseURL + ". No key or account is needed; the site is scraped."},
+		{Text: "", Widget: autoSubs, HintText: "Embedded as soft tracks with ffmpeg (no re-encode). Without ffmpeg the .srt files are saved beside the video instead."},
+		{Text: "ffmpeg", Widget: ffmpegPath, HintText: "Path to ffmpeg.exe, or blank to auto-detect."},
 
 		{Text: "", Widget: settingsHeading("Other")},
 		{Text: "Video player", Widget: playerPath, HintText: "Path to a player exe, or blank to auto-detect. Play passes the stream and subtitle to it."},

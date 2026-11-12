@@ -29,7 +29,17 @@ func (u *UI) queueDownload(link api.DownloadLink) {
 		savePath := uriToPath(writer.URI())
 		writer.Close() // the queue's stream server opens the file itself
 
-		u.downloads.Add(link.Describe(), link.URL, savePath)
+		id := u.downloads.Add(link.Describe(), link.URL, savePath)
+
+		// Captured now: by the time this finishes, the detail pane may show a
+		// different title entirely.
+		u.mu.RLock()
+		meta := autoSubJob{title: u.subTitle, imdb: u.subIMDB, year: u.subYear, series: u.detail.IsSeries()}
+		u.mu.RUnlock()
+		if meta.series {
+			meta.season, meta.episode = episodeFrom(filepath.Base(savePath), link.Label, suggestedSaveName(link.URL))
+		}
+		u.rememberAutoSub(id, meta)
 
 		active, queued, _ := u.downloads.Counts()
 		if active+queued > 1 {
@@ -131,7 +141,11 @@ func (u *UI) downloadRow(job download.Snapshot, index, count int) fyne.CanvasObj
 		bar.SetValue(1)
 	}
 
-	status := widget.NewLabel(describeJob(job))
+	text := describeJob(job)
+	if post := u.postStatusOf(job.ID); post != "" {
+		text += "\n" + post
+	}
+	status := widget.NewLabel(text)
 	status.Wrapping = fyne.TextWrapWord
 
 	var actions []fyne.CanvasObject

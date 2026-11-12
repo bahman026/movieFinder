@@ -98,6 +98,10 @@ type Queue struct {
 
 	wake     chan struct{}
 	onChange func()
+	// onDone fires once per job that finishes successfully, on the worker
+	// goroutine. It is what lets the UI start post-processing (subtitles) on a
+	// completed file without polling the job list for state transitions.
+	onDone func(Snapshot)
 	// newServer is swapped in tests so the queue can be exercised without a
 	// real network transfer.
 	newServer func(url, savePath string, resumeFrom int64) downloader
@@ -129,6 +133,17 @@ func New(onChange func()) *Queue {
 	}
 	go q.run()
 	return q
+}
+
+// SetOnDone registers fn to run once for every job that completes successfully
+// — not for failed, cancelled or paused ones. It runs on the worker goroutine
+// after the job is already marked done and the slot released, so a slow fn
+// does not hold up the next download; a UI caller must still hop to its own
+// thread.
+func (q *Queue) SetOnDone(fn func(Snapshot)) {
+	q.mu.Lock()
+	q.onDone = fn
+	q.mu.Unlock()
 }
 
 // Add puts a download at the back of the queue and returns its id.
@@ -509,11 +524,23 @@ func (q *Queue) runJob(j *job) {
 			j.state = StateDone
 		}
 		finished := j.state.Done()
+		var onDone func(Snapshot)
+		var snap Snapshot
+		if j.state == StateDone {
+			onDone = q.onDone
+			snap = Snapshot{
+				ID: j.id, Title: j.title, SavePath: j.savePath, State: j.state,
+				Downloaded: j.downloaded, Total: j.total,
+			}
+		}
 		q.mu.Unlock()
 
 		q.notify()
 		if finished {
 			q.clearActive(j)
+			if onDone != nil {
+				onDone(snap)
+			}
 			return
 		}
 	}

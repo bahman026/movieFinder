@@ -163,6 +163,12 @@ type UI struct {
 	downloadsBox    *fyne.Container // rows, populated only while the dialog is open
 	downloadsDialog dialog.Dialog
 
+	// autoSubJobs and postStatus (guarded by mu) carry the automatic-subtitle
+	// step for queued downloads: what to search for, keyed by job id, and the
+	// line shown under a finished job while subtitles are added. See autosubs.go.
+	autoSubJobs map[int]autoSubJob
+	postStatus  map[int]string
+
 	// Status-bar readout for the running queue job, so progress is visible
 	// without opening the dialog. Hidden whenever nothing is downloading.
 	queueProgress      *fyne.Container
@@ -220,6 +226,9 @@ func Run() {
 	// any widget.
 	u.downloads = download.New(func() {
 		u.onUI("The downloads list", u.refreshDownloads)
+	})
+	u.downloads.SetOnDone(func(job download.Snapshot) {
+		u.onUI("Adding subtitles", func() { u.onDownloadDone(job) })
 	})
 
 	w.SetContent(u.build())

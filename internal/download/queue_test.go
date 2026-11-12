@@ -565,3 +565,41 @@ func TestCountsSummarisesTheQueue(t *testing.T) {
 		return active == 1 && queued == 1 && finished == 1
 	})
 }
+
+// OnDone is the hook post-processing hangs off: once per completed job, never
+// for one that failed.
+func TestOnDoneFiresOnceForEachCompletedJob(t *testing.T) {
+	q, _, get := newTestQueue(t)
+
+	var mu sync.Mutex
+	var done []string
+	q.SetOnDone(func(s Snapshot) {
+		mu.Lock()
+		done = append(done, s.SavePath)
+		mu.Unlock()
+	})
+
+	q.Add("A", "url-a", "/tmp/a")
+	failed := q.Add("B", "url-b", "/tmp/b")
+	q.Add("C", "url-c", "/tmp/c")
+
+	waitFor(t, "a to start", func() bool { return get("url-a") != nil })
+	get("url-a").complete()
+	waitFor(t, "b to start", func() bool { return get("url-b") != nil })
+	get("url-b").fail(errors.New("boom"))
+	waitFor(t, "b to fail", func() bool { return stateOf(q, failed) == StateFailed })
+	waitFor(t, "c to start", func() bool { return get("url-c") != nil })
+	get("url-c").complete()
+
+	waitFor(t, "both completions to be reported", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(done) == 2
+	})
+	time.Sleep(600 * time.Millisecond) // one more tick: nothing fires twice
+	mu.Lock()
+	defer mu.Unlock()
+	if len(done) != 2 || done[0] != "/tmp/a" || done[1] != "/tmp/c" {
+		t.Errorf("onDone saw %v, want [/tmp/a /tmp/c]", done)
+	}
+}

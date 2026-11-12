@@ -21,7 +21,7 @@ Tests and vet run in the build image, which already carries the CA and module ca
 ```powershell
 docker build --target base -t moviefinder-base .
 docker run --rm -v "${PWD}:/src" -w /src -e CGO_ENABLED=0 -e GOOS=linux moviefinder-base `
-    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/mysubs/... ./internal/delfan/... ./internal/player/... ./internal/stream/... ./internal/download/... ./internal/safe/...
+    go test ./internal/api/... ./internal/config/... ./internal/opensubtitles/... ./internal/mysubs/... ./internal/delfan/... ./internal/player/... ./internal/stream/... ./internal/download/... ./internal/safe/... ./internal/mux/...
 ```
 
 The Dockerfile is a shared `base` stage plus `build-windows` / `build-linux` targets (with `export` / `export-linux` scratch stages). `base` now carries the Linux GL/X11 dev libs too, so it can build both OSes. See BUILD.md for the user-facing build steps.
@@ -86,6 +86,18 @@ Two consequences worth keeping in mind:
 - **Resuming depends on the host honouring `Range`.** `stream.NewResuming` sends `bytes=N-` and appends only on a `206`; a `200` means the host is sending from the top, so the partial file is truncated and restarted rather than appended to, which would silently corrupt it. `416` means there is nothing past `N`, i.e. the file is already complete, and finishes cleanly.
 
 `MoveUp`/`MoveDown` swap adjacent entries in `q.jobs`, which is the order `takeNext` scans, so reordering chooses what runs next without preempting what is running. Pausing a `StateQueued` job is allowed and simply makes it ineligible — "paused" means "not a candidate", whether or not it ever started.
+
+### Automatic subtitles after a queued download (`ui/autosubs.go`, `internal/mux`)
+
+When a **queued** job finishes (`Queue.SetOnDone`), the app searches each of `config.AutoSubtitleLanguages` (default `en`, `fa`) on the default source, falling back to the other, ranks hits by release-name tokens shared with the file, writes them as `Movie.<lang>.srt`, then has ffmpeg stream-copy the video into `Movie.mkv` with those as the first subtitle tracks (no re-encode). Things to keep:
+
+- **Metadata is captured at queue time** (`rememberAutoSub`), not read at completion: by then the detail pane shows another title. Series need `SxxEyy` in the file name/label; without it the step is skipped with a message rather than guessing.
+- **Output is always MKV.** An `.mp4` becomes `.mkv` and the `.mp4` is removed; its own mov_text subtitles are dropped because they cannot be copied into MKV. The original is only replaced once the temp output exists and is >= 90% of the source size.
+- **`mux.ToUTF8`** converts legacy code pages (Persian subs are usually Windows-1256); an MKV text track is UTF-8 by definition.
+- **No ffmpeg is not a failure**: the `.srt` sidecars stay beside the video. On Windows ffmpeg runs with `CREATE_NO_WINDOW` so no console flashes.
+- Play-along downloads are excluded: the player holds the file open, and Windows will not let it be replaced.
+
+my-subs.co is behind Cloudflare; `520`-`524` (522 = Cloudflare's connection to the origin timed out) and `502`/`503`/`504` are retried twice (2s, 5s) in `mysubs.getWithHeader` before being reported.
 
 ### The API and its two quirks
 

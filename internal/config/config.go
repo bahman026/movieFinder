@@ -70,6 +70,15 @@ type Config struct {
 	// PlayerPath is an explicit external video player executable. Empty means
 	// auto-detect (PotPlayer, mpv, VLC, MPC-HC).
 	PlayerPath string `json:"player_path"`
+
+	// AutoSubtitles fetches subtitles in AutoSubtitleLanguages once a queued
+	// download finishes, and embeds them into the video with ffmpeg (or leaves
+	// them beside it when ffmpeg is missing).
+	AutoSubtitles         bool     `json:"auto_subtitles"`
+	AutoSubtitleLanguages []string `json:"auto_subtitle_languages"`
+
+	// FFmpegPath is an explicit ffmpeg executable. Empty means auto-detect.
+	FFmpegPath string `json:"ffmpeg_path"`
 }
 
 // Default returns the working settings for the known API.
@@ -86,6 +95,9 @@ func Default() Config {
 		SP:               true,
 		TimeoutSeconds:   30,
 		SubtitleProvider: "mysubs",
+
+		AutoSubtitles:         true,
+		AutoSubtitleLanguages: []string{"en", "fa"},
 	}
 }
 
@@ -155,6 +167,9 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.SubtitleProvider) == "" {
 		cfg.SubtitleProvider = Default().SubtitleProvider
+	}
+	if len(cfg.AutoSubtitleLanguages) == 0 {
+		cfg.AutoSubtitleLanguages = Default().AutoSubtitleLanguages
 	}
 	return cfg, nil
 }

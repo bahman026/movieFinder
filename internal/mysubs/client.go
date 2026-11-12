@@ -497,10 +497,60 @@ func (c *Client) get(ctx context.Context, ref, referer string) ([]byte, error) {
 	return body, err
 }
 
+// getWithHeader fetches one page, retrying the answers Cloudflare gives when
+// it cannot reach my-subs.co's own server (520-524) and the usual transient
+// gateway errors. Those mean the origin was slow or briefly down — a 522 is
+// Cloudflare's TCP connect to the origin timing out — and a second try a few
+// seconds later commonly succeeds. Anything else fails at once.
 func (c *Client) getWithHeader(ctx context.Context, ref, referer string) ([]byte, http.Header, error) {
+	var lastErr error
+	for attempt, wait := range retryWaits {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, lastErr
+			case <-time.After(wait):
+			}
+		}
+		body, header, status, err := c.getOnce(ctx, ref, referer)
+		if err == nil {
+			return body, header, nil
+		}
+		lastErr = err
+		if !retryable(status) {
+			return nil, nil, err
+		}
+	}
+	return nil, nil, lastErr
+}
+
+// retryWaits is the pause before each attempt; its length is the attempt
+// count. A var so tests need not sleep.
+var retryWaits = []time.Duration{0, 2 * time.Second, 5 * time.Second}
+
+func retryable(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+		520, 521, 522, 523, 524:
+		return true
+	}
+	return false
+}
+
+// statusText adds a plain explanation to Cloudflare's own codes, which have no
+// standard reason phrase and otherwise read as a bare number.
+func statusText(resp *http.Response) string {
+	switch resp.StatusCode {
+	case 520, 521, 522, 523, 524:
+		return resp.Status + " (Cloudflare could not reach the my-subs.co server; the site is down or overloaded, not a problem on your side)"
+	}
+	return resp.Status
+}
+
+func (c *Client) getOnce(ctx context.Context, ref, referer string) ([]byte, http.Header, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.absolute(ref), nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build request: %w", err)
+		return nil, nil, 0, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("User-Agent", browserUA)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -511,7 +561,7 @@ func (c *Client) getWithHeader(ctx context.Context, ref, referer string) ([]byte
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("request: %w", err)
+		return nil, nil, 0, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -519,12 +569,12 @@ func (c *Client) getWithHeader(ctx context.Context, ref, referer string) ([]byte
 	// cannot exhaust memory.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read response: %w", err)
+		return nil, nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("my-subs.co answered %s", resp.Status)
+		return nil, nil, resp.StatusCode, fmt.Errorf("my-subs.co answered %s", statusText(resp))
 	}
-	return body, resp.Header, nil
+	return body, resp.Header, resp.StatusCode, nil
 }
 
 // absolute resolves a site-relative path against the configured base. Links on

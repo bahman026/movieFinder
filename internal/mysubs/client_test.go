@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fixtures below are trimmed copies of the real markup — the attribute
@@ -350,6 +351,10 @@ func TestUnrecognisableSubtitlePageYieldsNoResults(t *testing.T) {
 // An outage is an error the caller can show, not something that hangs or
 // panics — the rest of the app carries on without subtitles.
 func TestSiteOutageIsAPlainError(t *testing.T) {
+	saved := retryWaits
+	retryWaits = []time.Duration{0, 0, 0} // 503 is retried; do not sleep through it
+	defer func() { retryWaits = saved }()
+
 	for _, status := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusForbidden} {
 		c, _ := testServer(t, map[string]http.HandlerFunc{
 			"/search.php": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) },
@@ -367,5 +372,51 @@ func TestSearchEscapesTheQuery(t *testing.T) {
 	_, _ = c.Search(context.Background(), Query{Title: "Fast & Furious", Language: "en"})
 	if len(*asked) == 0 || !strings.Contains((*asked)[0], "key=Fast+%26+Furious") {
 		t.Fatalf("query not escaped: %v", *asked)
+	}
+}
+
+// A 522 is Cloudflare failing to reach the origin — usually momentary — so it
+// is retried rather than reported on the first answer.
+func TestCloudflareOriginErrorIsRetried(t *testing.T) {
+	saved := retryWaits
+	retryWaits = []time.Duration{0, 0, 0}
+	defer func() { retryWaits = saved }()
+
+	calls := 0
+	c, _ := testServer(t, map[string]http.HandlerFunc{
+		"/search.php": func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if calls == 1 {
+				w.WriteHeader(522)
+				return
+			}
+			w.Write([]byte(searchPage))
+		},
+	})
+	if _, err := c.Search(context.Background(), Query{Title: "Inception", Year: "2010", Language: "fa"}); err != nil {
+		t.Fatalf("search after one 522: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("search page fetched %d times, want 2", calls)
+	}
+}
+
+func TestNotFoundIsNotRetried(t *testing.T) {
+	saved := retryWaits
+	retryWaits = []time.Duration{0, 0, 0}
+	defer func() { retryWaits = saved }()
+
+	calls := 0
+	c, _ := testServer(t, map[string]http.HandlerFunc{
+		"/search.php": func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			http.NotFound(w, r)
+		},
+	})
+	if _, err := c.Search(context.Background(), Query{Title: "X", Language: "en"}); err == nil {
+		t.Fatal("want an error for a 404")
+	}
+	if calls != 1 {
+		t.Errorf("404 fetched %d times, want 1", calls)
 	}
 }
