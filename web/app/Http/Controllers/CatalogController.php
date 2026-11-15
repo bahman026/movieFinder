@@ -223,6 +223,23 @@ class CatalogController extends Controller
         return $src === 'db2' ? $this->delfan($request)->resolve($url) : $url;
     }
 
+    /**
+     * Release names say what a browser will choke on: x265/HEVC video, and
+     * AC3/E-AC3/DTS/TrueHD (often marked 6CH or 5.1) audio. Most phones and
+     * desktop browsers play only H.264 video with AAC audio.
+     */
+    private static function formatWarning(string $file): ?string
+    {
+        if (preg_match('/x265|hevc|h\.?265/i', $file)) {
+            return 'This file is x265/HEVC video, which most browsers can\'t play.';
+        }
+        if (preg_match('/(^|[^a-z0-9])(ac3|e-?ac3|ddp?\d?|dts|truehd|atmos|6ch|5\.1|7\.1)([^a-z0-9]|$)/i', $file)) {
+            return 'This file probably has AC3/DTS (surround) audio, which many browsers, phones especially, can\'t play.';
+        }
+
+        return null;
+    }
+
     private static function fileName(string $url): string
     {
         return rawurldecode(basename((string) parse_url($url, PHP_URL_PATH))) ?: 'video.mp4';
@@ -263,7 +280,7 @@ class CatalogController extends Controller
             'label' => $meta['labels'][$index] ?? $file,
             'streamUrl' => route('stream', ['t' => $token]),
             'directUrl' => $url,
-            'browserPlayable' => ! preg_match('/x265|hevc|h\.?265/i', $file),
+            'formatWarning' => self::formatWarning($file),
             'subs' => $subs, 'subError' => $subError, 'subForm' => $subForm, 'chosen' => $chosen,
             'languages' => config('movies.subtitles.languages'),
         ]);

@@ -8,10 +8,10 @@
     <h1 dir="auto" style="margin-bottom:4px">{{ $meta['title'] }}</h1>
     <p class="muted" dir="auto" style="margin-top:0">{{ $label }} · {{ $file }}</p>
 
-    @unless ($browserPlayable)
-        <p class="notice">This file is x265/HEVC, which most browsers can't play. If the picture stays black,
-            use <strong>Download</strong> or open the <strong>Direct link</strong> in VLC or PotPlayer.</p>
-    @endunless
+    @if ($formatWarning)
+        <p class="notice">{{ $formatWarning }} If it doesn't play, use <strong>Open in VLC</strong> (phone) or
+            <strong>Download</strong> / <strong>Copy link</strong> into VLC or PotPlayer.</p>
+    @endif
 
     <section class="player">
         {{-- Straight from the database host: no traffic on this server. No crossorigin
@@ -23,9 +23,7 @@
                        src="{{ route('subtitles.vtt', ['provider' => $chosen['provider'], 'ref' => $chosen['ref'], 'lang' => $subForm['lang']]) }}">
             @endif
         </video>
-        <p id="playError" class="error" hidden>The video didn't load straight from the database host.
-            Try <strong>Play via codegeek</strong> below (uses this server's traffic), or Download / Open in VLC.
-            An MKV with x265 can't play in a browser at all.</p>
+        <p id="playError" class="error" hidden></p>
 
         <div class="bar">
             <a class="btn" href="{{ $directUrl }}" rel="noreferrer nofollow" title="Direct from the database host: no traffic on this server. If the browser warns, choose Keep.">⬇ Download video</a>
@@ -94,16 +92,20 @@
 
     <script>
         (function () {
-            var video = document.getElementById('player');
-            video.addEventListener('error', function () { document.getElementById('playError').hidden = false; }, true);
-            // A <source> error does not bubble to the video element; listen on it too.
-            var source = video.querySelector('source');
-            if (source) source.addEventListener('error', function () { document.getElementById('playError').hidden = false; });
+            var video = document.getElementById('player'), source = video.querySelector('source');
+            var errBox = document.getElementById('playError'), viaBtn = document.getElementById('viaSite');
+            var handled = false;
 
-            // Fallback: switch the same player to the through-the-server stream, keeping the position.
-            document.getElementById('viaSite').addEventListener('click', function () {
+            function say(html, isError) {
+                errBox.innerHTML = html;
+                errBox.className = isError ? 'error' : 'notice';
+                errBox.hidden = false;
+            }
+
+            // Switch the same player to the through-the-server stream, keeping the position.
+            function playVia() {
                 var at = video.currentTime || 0, wasPlaying = !video.paused;
-                var source = video.querySelector('source');
+                handled = false;
                 source.src = video.dataset.via;
                 video.load();
                 video.addEventListener('loadedmetadata', function once() {
@@ -111,9 +113,42 @@
                     if (at) video.currentTime = at;
                     if (wasPlaying || at === 0) video.play().catch(function () {});
                 });
-                document.getElementById('playError').hidden = true;
-                this.disabled = true; this.textContent = 'Playing via codegeek';
-            });
+                viaBtn.disabled = true; viaBtn.textContent = 'Playing via codegeek';
+            }
+            viaBtn.addEventListener('click', function () { errBox.hidden = true; playVia(); });
+
+            // Is the movie host reachable from this device at all? An opaque no-cors
+            // fetch resolves as soon as the host answers (then it is aborted, so the
+            // file is not downloaded) and rejects when the network can't reach it.
+            function hostReachable(url) {
+                var ctrl = new AbortController(), timer = setTimeout(function () { ctrl.abort(); }, 8000);
+                return fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+                    .then(function () { return true; }, function () { return false; })
+                    .then(function (ok) { clearTimeout(timer); ctrl.abort(); return ok; });
+            }
+
+            var formatHelp = ' Use <strong>Open in VLC</strong> on a phone, or <strong>Download</strong> / <strong>Copy link</strong> into VLC or PotPlayer.';
+            function onFail() {
+                if (handled) return;
+                handled = true;
+                if (source.src === video.dataset.via) {
+                    say('This browser can\'t play this file (usually x265 video or AC3/DTS audio).' + formatHelp, true);
+                    return;
+                }
+                say('The video didn\'t start. Checking whether this device can reach the movie host…', false);
+                hostReachable(video.dataset.direct).then(function (reachable) {
+                    if (reachable) {
+                        // Same bytes via codegeek would fail the same way: don't spend server traffic on it.
+                        say('The movie host answers, so this browser can\'t play the file\'s format (usually x265 video or AC3/DTS audio).' + formatHelp, true);
+                    } else {
+                        say('This device can\'t reach the movie host (often a VPN or an internet-provider block), so it is now <strong>playing via codegeek</strong>, which uses this server\'s traffic. Turning the VPN off may let it play directly.', false);
+                        playVia();
+                    }
+                });
+            }
+            video.addEventListener('error', onFail, true);
+            // A <source> error does not bubble to the video element; listen on it too.
+            source.addEventListener('error', onFail);
 
             document.getElementById('copyLink').addEventListener('click', function () {
                 var btn = this;
