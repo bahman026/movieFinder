@@ -60,8 +60,9 @@ signing as `internal/delfan` in the Go desktop app, and shows the results as web
 
 ## Next
 
-- [ ] Streaming goes through the VPS, so every viewer uses server bandwidth and one PHP worker (16 in production).
-      Watch traffic; move video to a dedicated proxy (e.g. nginx) if it grows.
+- [x] Zero video traffic on the server: Download, Copy link and Open in VLC go straight to the movie hosts; the
+      Watch page is served over http so the player streams straight from them (HSTS off for codegeek.ir only).
+      "Play via codegeek" is the only through-the-server path, as a fallback.
 
 - [ ] Delfan search filters (`type`, `genre`, `year_from`/`year_to`, `imdb`, `sort_by`): the accepted values are
       not known yet. Read them from the app or capture real requests before adding a form.

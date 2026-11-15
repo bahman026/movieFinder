@@ -5,6 +5,12 @@
 return [
     'default_source' => env('MOVIES_DEFAULT_SOURCE', 'db1'), // db1 (playstore API) | db2 (Delfan API)
 
+    // Serve the Watch page over plain http so the player can stream straight from
+    // the database hosts (http-only): an https page would have the browser block
+    // the video. Needs the http://codegeek.ir block in Caddy and no HSTS on the
+    // domain; see DEPLOY.md. Off by default (local/dev stay as they are).
+    'watch_over_http' => (bool) env('WATCH_OVER_HTTP', false),
+
     'playstore' => [
         // Ordered mirror list, comma separated. The one that answered last is tried first.
         'hosts' => env('PLAYSTORE_HOSTS', 'http://cdntest.host4dns.n2bapp.ir,http://mjapiservers.com'),

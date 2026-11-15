@@ -15,6 +15,9 @@ services:
       # viewer watching or downloading holds one worker for the whole transfer.
       # 16 workers ~ a dozen simultaneous viewers plus normal browsing.
       PHP_CLI_SERVER_WORKERS: "16"
+      # Watch pages on http so the player streams straight from the movie hosts
+      # (no video traffic here). Needs the http://codegeek.ir Caddy block.
+      WATCH_OVER_HTTP: "true"
     # No public port: Caddy (togamode_edge_proxy) reaches moviefinder_web:8080 over togamode_edge.
     networks: [edge]
     mem_limit: 384m   # streaming is chunked (flat memory); this covers 16 idle workers
