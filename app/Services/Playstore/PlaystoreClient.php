@@ -215,7 +215,8 @@ class PlaystoreClient
             'subtitle' => (string) ($m['writer'] ?? ''),
             'year' => substr((string) ($m['release'] ?? ''), 0, 4),
             'rating' => (string) ($m['imdb_rating'] ?? ''),
-            'thumb' => (string) (($m['thumbnail_url'] ?? '') ?: ($m['poster_url'] ?? '')),
+            // The slider (and some lists) also carry the dead CDN host.
+            'thumb' => $this->fixImage((string) (($m['thumbnail_url'] ?? '') ?: ($m['poster_url'] ?? ''))),
             'kind' => ($m['is_tvseries'] ?? '') === '1' ? 'tvseries' : 'movie',
         ];
     }
