@@ -24,14 +24,21 @@
             @endif
         </video>
         <p id="playError" class="error" hidden></p>
+        <p id="dlNote" class="notice" hidden>Downloading the video and its subtitle. If only one file arrives, allow
+            <strong>multiple downloads</strong> when the browser asks, or tap <strong>Download subtitle</strong>.
+            Keep both files in the same folder so the player finds the subtitle.</p>
 
         <div class="bar">
-            <a class="btn" href="{{ $directUrl }}" rel="noreferrer nofollow" title="Direct from the database host: no traffic on this server. If the browser warns, choose Keep.">⬇ Download video</a>
+            <a class="btn" id="dlVideo" href="{{ $directUrl }}" rel="noreferrer nofollow" title="Direct from the database host: no traffic on this server. If the browser warns, choose Keep.">⬇ Download video</a>
+            {{-- Video straight from the movie host + the chosen subtitle saved under the video's
+                 name (Movie.fa.srt), so players load it automatically. --}}
+            <button type="button" class="btn primary" id="dlBoth" data-base="{{ $fileBase }}" @unless ($chosen) hidden @endunless
+                    title="Downloads the video and the selected subtitle with matching names: VLC, MX Player and PotPlayer show the subtitle automatically">⬇ Video + subtitle</button>
             <button type="button" class="btn" id="copyLink" data-url="{{ $directUrl }}" title="For IDM, ADM, VLC or PotPlayer">Copy link</button>
             <button type="button" class="btn ghost" id="viaSite" title="Fallback if the direct stream fails: the video then goes through codegeek.ir and uses its traffic">Play via codegeek</button>
             <a class="btn ghost" href="vlc://{{ $directUrl }}" title="Opens the VLC app on a phone or tablet, streaming straight from the database host">Open in VLC</a>
             <span class="muted" id="curSubBox" @unless ($chosen) hidden @endunless>Subtitle: <span dir="auto" id="curSub">{{ $chosen['label'] ?? '' }}</span></span>
-            <a class="btn ghost" id="curSubDl" rel="nofollow" @if ($chosen) href="{{ route('subtitles.download', ['provider' => $chosen['provider'], 'ref' => $chosen['ref']]) }}" @else hidden @endif>⬇ Download subtitle</a>
+            <a class="btn ghost" id="curSubDl" rel="nofollow" @if ($chosen) href="{{ route('subtitles.download', ['provider' => $chosen['provider'], 'ref' => $chosen['ref'], 'lang' => $subForm['lang'], 'name' => $fileBase.'.'.$subForm['lang']]) }}" @else hidden @endif>⬇ Download subtitle</a>
             <button type="button" class="btn ghost" id="subOff" @unless ($chosen) hidden @endunless>Subtitle off</button>
             <label class="btn" style="cursor:pointer">Use my own .srt / .vtt
                 <input type="file" id="ownSub" accept=".srt,.vtt,text/vtt,application/x-subrip" hidden>
@@ -177,9 +184,30 @@
                 }
                 cur.textContent = label || '';
                 curBox.hidden = off.hidden = !src;
-                if (dlUrl) { curDl.href = dlUrl; curDl.hidden = false; } else { curDl.hidden = true; curDl.removeAttribute('href'); }
+                if (dlUrl) {
+                    // Name the subtitle after the video (Movie.2010.720p.fa.srt) so players pick it up.
+                    curDl.href = dlUrl + '&lang=' + encodeURIComponent(lang || '') + '&name=' + encodeURIComponent(dlBoth.dataset.base + '.' + (lang || 'sub'));
+                    curDl.hidden = false;
+                } else { curDl.hidden = true; curDl.removeAttribute('href'); }
+                dlBoth.hidden = !dlUrl;
             }
             off.addEventListener('click', function () { setTrack(null); });
+
+            // Video + subtitle: the video straight from the movie host (no server traffic),
+            // then the subtitle under the video's name. Two separate downloads; browsers may
+            // ask once to allow multiple downloads from this site.
+            var dlBoth = document.getElementById('dlBoth');
+            function clickLink(href) {
+                var a = document.createElement('a');
+                a.href = href; a.rel = 'noreferrer'; a.style.display = 'none';
+                document.body.appendChild(a); a.click(); a.remove();
+            }
+            dlBoth.addEventListener('click', function () {
+                if (!curDl.href) return;
+                document.getElementById('dlNote').hidden = false;
+                clickLink(document.getElementById('dlVideo').href);
+                setTimeout(function () { clickLink(curDl.href); }, 1200);
+            });
 
             document.addEventListener('click', function (e) {
                 var a = e.target.closest && e.target.closest('a.use-sub');
