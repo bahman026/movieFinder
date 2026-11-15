@@ -30,15 +30,36 @@
         ul.links li { display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); }
         .pager { display:flex; gap:8px; justify-content:center; margin-top:20px; }
         pre { white-space:pre-wrap; font:inherit; }
+        .sources { display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+        .sources a { padding:7px 12px; color:var(--fg); text-decoration:none; }
+        .sources a.on { background:var(--accent); color:#fff; }
+        .slider { display:flex; gap:12px; overflow-x:auto; padding-bottom:8px; margin-bottom:16px; }
+        .slider .card { flex:0 0 140px; }
+        .subs form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
+        select, input[type=number] { padding:7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+        input[type=number] { width:80px; }
+        .tags { display:flex; flex-wrap:wrap; gap:6px; }
+        .tags span { border:1px solid var(--line); border-radius:999px; padding:2px 10px; font-size:13px; }
+        .people { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:14px; }
     </style>
 </head>
 <body>
 <header>
     <a class="brand" href="{{ route('home') }}">MovieFinder</a>
+    @php $src = $src ?? session('source', config('movies.default_source')); @endphp
+    <nav class="sources" aria-label="Source">
+        @foreach (\App\Http\Controllers\CatalogController::SOURCES as $key => $label)
+            <a href="{{ route('home', ['src' => $key]) }}" @class(['on' => $src === $key])>{{ $label }}</a>
+        @endforeach
+    </nav>
     <form class="search" action="{{ route('home') }}" method="get">
+        <input type="hidden" name="src" value="{{ $src }}">
         <input type="search" name="q" value="{{ $q ?? '' }}" placeholder="Search titles" dir="auto">
         <button type="submit">Search</button>
     </form>
+    @if ($src === 'delfan')
+        <a class="btn" href="{{ route('cast') }}">Actors</a>
+    @endif
     <form action="{{ route('reset') }}" method="post">
         @csrf
         <button type="submit" title="Drop the anonymous upstream session">New session</button>

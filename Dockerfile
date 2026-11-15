@@ -1,6 +1,7 @@
 # Tiny image for the MovieFinder web front-end (Laravel).
 # Build:  docker build -t moviefinder-web .
-# Run:    docker run --rm -p 8080:8080 moviefinder-web
+# Run:    docker run --rm -p 8080:8080 --env-file .env.production moviefinder-web
+#         (.env.production is git-ignored; put OPENSUBTITLES_API_KEY and any overrides there)
 
 # --- dependencies (composer only lives in this stage) ---
 FROM composer:2 AS vendor
@@ -26,6 +27,12 @@ ENV APP_ENV=production \
     CACHE_STORE=file \
     QUEUE_CONNECTION=sync \
     DB_CONNECTION=sqlite
+
+# zip: some my-subs.co uploads are zipped and are unwrapped server side.
+RUN apk add --no-cache libzip \
+ && apk add --no-cache --virtual .build libzip-dev \
+ && docker-php-ext-install zip \
+ && apk del .build
 
 RUN chmod +x /entrypoint.sh \
  && rm -f bootstrap/cache/*.php \

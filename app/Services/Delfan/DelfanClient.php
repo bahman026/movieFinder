@@ -104,18 +104,60 @@ class DelfanClient
 
             $desc = (string) ($d['description'] ?? '');
 
+            $original = $this->originalTitle($desc);
+
             return [
+                'source' => 'delfan',
                 'id' => $id,
-                'title' => $d['title'] ?? '',
-                'original_title' => $this->originalTitle($desc),
-                'imdb_rating' => $d['imdb_rating'] ?? '',
+                'kind' => $isMovie ? 'movie' : 'tvseries',
+                'title' => $original ?: ($d['title'] ?? ''),
+                'local_title' => $d['title'] ?? '',
+                'original_title' => $original,
+                'imdb_id' => '',
+                'rating' => $d['imdb_rating'] ?? '',
+                'genres' => [],
+                'cast' => [],
                 'description' => trim(str_replace(['<br>', '<br/>', '<br />', "\r"], ["\n", "\n", "\n", ''], $desc)),
                 'year' => $d['year'] ?? '',
-                'poster' => $d['poster_url'] ?? '',
-                'trailer' => $d['trailer_url'] ?? '',
+                'poster' => ($d['poster_url'] ?? '') ?: ($d['thumbnail_url'] ?? ''),
                 'is_movie' => $isMovie,
                 'links' => $links,
                 'seasons' => $seasons,
+            ];
+        });
+    }
+
+    /** People (actors/directors) matching a name. */
+    public function searchCast(string $name): array
+    {
+        $name = trim($name);
+        if ($name === '') {
+            return [];
+        }
+
+        return $this->locked(function () use ($name) {
+            $resp = $this->roundtrip('search_cast&pageno=1', ['q' => $name, 'cast_type' => 'cast']);
+            $this->assertOk($resp);
+
+            return array_map(fn ($p) => [
+                'id' => (string) (int) ($p['id'] ?? 0),
+                'name' => (string) ($p['name'] ?? ''),
+                'role' => (string) ($p['action_user'] ?? ''),
+                'pic' => (string) ($p['pic_url'] ?? ''),
+            ], $resp['movie_list'] ?? []);
+        });
+    }
+
+    /** One page of a person's titles, plus their bio. */
+    public function castMovies(string $castId, int $page = 1): array
+    {
+        return $this->locked(function () use ($castId, $page) {
+            $resp = $this->roundtrip('show_movie_cast&pageno='.max(1, $page), ['cast_id' => $castId, 'cast_type' => 'cast']);
+            $this->assertOk($resp);
+
+            return [
+                'items' => array_map(fn ($it) => $this->item($it), $resp['movie_list'] ?? []),
+                'bio' => trim(strip_tags(str_replace('<br>', "\n", (string) ($resp['bio'] ?? '')))),
             ];
         });
     }
@@ -159,8 +201,20 @@ class DelfanClient
 
         return $lock->block(30, function () use ($fn) {
             $this->ensureSession();
+            try {
+                return $fn();
+            } catch (RuntimeException $e) {
+                // "N - error identifying connection": the upstream session or
+                // nonce went stale (expired login, rotated host). Log in fresh
+                // once and retry; a second failure is a real error.
+                if (! str_contains($e->getMessage(), 'error identifying connection')) {
+                    throw $e;
+                }
+                $this->reset();
+                $this->ensureSession();
 
-            return $fn();
+                return $fn();
+            }
         });
     }
 
@@ -285,9 +339,11 @@ class DelfanClient
         return [
             'id' => (string) ($it['videos_id'] ?? ''),
             'title' => $it['title'] ?? '',
-            'year' => $it['year'] ?? '',
-            'imdb' => $it['imdb'] ?? '',
+            'subtitle' => '',
+            'year' => (string) ($it['year'] ?? ''),
+            'rating' => (string) ($it['imdb'] ?? ''),
             'thumb' => $it['thumbnail_url'] ?? '',
+            'kind' => '',
         ];
     }
 

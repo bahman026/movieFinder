@@ -5,6 +5,13 @@
         <p class="error">{{ $error }}</p>
     @endif
 
+    @if ($slider)
+        <h2>Featured</h2>
+        <div class="slider">
+            @foreach ($slider as $it) @include('delfan._card') @endforeach
+        </div>
+    @endif
+
     <h2>{{ $q === '' ? 'Latest' : 'Results for “'.$q.'”' }}</h2>
 
     @if (empty($items) && ! $error)
@@ -12,25 +19,17 @@
     @endif
 
     <div class="grid">
-        @foreach ($items as $it)
-            <a class="card" href="{{ route('title', $it['id']) }}">
-                <img src="{{ $it['thumb'] }}" alt="" loading="lazy" referrerpolicy="no-referrer">
-                <div dir="auto">
-                    {{ $it['title'] }}
-                    <span class="muted">{{ $it['year'] }}@if ($it['imdb']) · IMDb {{ $it['imdb'] }}@endif</span>
-                </div>
-            </a>
-        @endforeach
+        @foreach ($items as $it) @include('delfan._card') @endforeach
     </div>
 
-    @if ($q !== '')
+    @if ($paged)
         <nav class="pager">
             @if ($page > 1)
-                <a class="btn" href="{{ route('home', ['q' => $q, 'page' => $page - 1]) }}">Previous</a>
+                <a class="btn" href="{{ route('home', array_filter(['q' => $q, 'page' => $page - 1])) }}">Previous</a>
             @endif
             <span class="muted">Page {{ $page }}</span>
             @if (! empty($items))
-                <a class="btn" href="{{ route('home', ['q' => $q, 'page' => $page + 1]) }}">Next</a>
+                <a class="btn" href="{{ route('home', array_filter(['q' => $q, 'page' => $page + 1])) }}">Next</a>
             @endif
         </nav>
     @endif
