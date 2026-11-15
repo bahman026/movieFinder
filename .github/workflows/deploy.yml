@@ -1,0 +1,88 @@
+# Lives at web/.github/ on main, which is inert there; publish-branch.sh puts it
+# at the root of the `deploy` branch, where it runs.
+#
+# test -> build the image -> push to GHCR -> (optional) deploy over SSH.
+# The deploy job only runs when the repository variable DEPLOY_ENABLED is "true",
+# so pushing the branch never touches the server until that is switched on.
+name: deploy
+
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/bahman026/moviefinder-web
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, zip
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist --no-progress
+      - run: cp .env.example .env && php artisan key:generate
+      - run: php artisan test
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      # SSH from GitHub to the server sometimes dies ~120s into the handshake,
+      # so each step retries. If it still fails, deploy by hand (see DEPLOY.md):
+      #   IMAGE_TAG=<sha> ./deploy.sh
+      - name: Copy stack files
+        run: |
+          for i in 1 2 3; do
+            scp -P 9011 -o ConnectTimeout=60 deploy/compose.yaml deploy/deploy.sh deploy@87.107.104.19:moviefinder/ && exit 0
+            echo "attempt $i failed"; sleep 15
+          done
+          exit 1
+      - name: Deploy ${{ github.sha }}
+        run: |
+          for i in 1 2 3; do
+            ssh -p 9011 -o ConnectTimeout=60 deploy@87.107.104.19 'bash -s' <<EOF && exit 0
+          set -e
+          cd ~/moviefinder
+          IMAGE_TAG=${{ github.sha }} ./deploy.sh
+          EOF
+            echo "attempt $i failed"; sleep 15
+          done
+          exit 1

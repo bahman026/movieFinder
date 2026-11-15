@@ -1,4 +1,4 @@
-@extends('delfan.layout')
+@extends('site.layout')
 
 @section('content')
     @if ($error)
@@ -8,7 +8,7 @@
     @if ($slider)
         <h2>Featured</h2>
         <div class="slider">
-            @foreach ($slider as $it) @include('delfan._card') @endforeach
+            @foreach ($slider as $it) @include('site._card') @endforeach
         </div>
     @endif
 
@@ -19,7 +19,7 @@
     @endif
 
     <div class="grid">
-        @foreach ($items as $it) @include('delfan._card') @endforeach
+        @foreach ($items as $it) @include('site._card') @endforeach
     </div>
 
     @if ($paged)

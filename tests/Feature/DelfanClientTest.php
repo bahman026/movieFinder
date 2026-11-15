@@ -42,6 +42,6 @@ class DelfanClientTest extends TestCase
 
     public function test_resolve_only_follows_links_the_title_offered(): void
     {
-        $this->get('/title/delfan/1/link/0')->assertNotFound();
+        $this->get('/title/db2/1/link/0')->assertNotFound();
     }
 }

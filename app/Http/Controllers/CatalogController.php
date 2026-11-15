@@ -16,7 +16,8 @@ use Throwable;
  */
 class CatalogController extends Controller
 {
-    public const SOURCES = ['playstore' => 'MovieFinder', 'delfan' => 'Delfan'];
+    /** URL slug => label. The upstream services are never named on the site. */
+    public const SOURCES = ['db1' => 'Database 1', 'db2' => 'Database 2'];
 
     private function delfan(Request $request): DelfanClient
     {
@@ -37,7 +38,7 @@ class CatalogController extends Controller
         }
         $src = $request->session()->get('source', config('movies.default_source'));
 
-        return isset(self::SOURCES[$src]) ? $src : 'playstore';
+        return isset(self::SOURCES[$src]) ? $src : 'db1';
     }
 
     public function home(Request $request)
@@ -49,7 +50,7 @@ class CatalogController extends Controller
         $paged = true;
 
         try {
-            if ($src === 'delfan') {
+            if ($src === 'db2') {
                 $items = $q === '' ? $this->delfan($request)->home() : $this->delfan($request)->search($q, $page);
                 $paged = $q !== '';
             } else {
@@ -74,7 +75,7 @@ class CatalogController extends Controller
             $error = $this->explain($e, $src);
         }
 
-        return view('delfan.index', compact('items', 'slider', 'q', 'page', 'error', 'src', 'paged'));
+        return view('site.index', compact('items', 'slider', 'q', 'page', 'error', 'src', 'paged'));
     }
 
     public function show(Request $request, string $src, string $id)
@@ -83,11 +84,11 @@ class CatalogController extends Controller
         $kind = $request->query('kind') === 'tvseries' ? 'tvseries' : 'movie';
 
         try {
-            $detail = $src === 'delfan'
+            $detail = $src === 'db2'
                 ? $this->delfan($request)->details($id)
                 : $this->playstore()->details($kind, $id);
         } catch (Throwable $e) {
-            return view('delfan.show', ['detail' => null, 'error' => $this->explain($e, $src), 'src' => $src]);
+            return view('site.show', ['detail' => null, 'error' => $this->explain($e, $src), 'src' => $src]);
         }
 
         // Remember which URLs this title offered, so the link route only
@@ -100,7 +101,7 @@ class CatalogController extends Controller
 
         [$subs, $subError, $subForm] = $this->subtitles($request, $detail);
 
-        return view('delfan.show', [
+        return view('site.show', [
             'detail' => $detail, 'error' => null, 'src' => $src,
             'subs' => $subs, 'subError' => $subError, 'subForm' => $subForm,
             'languages' => config('movies.subtitles.languages'),
@@ -174,7 +175,7 @@ class CatalogController extends Controller
         $url = $request->session()->get("links.$src.$id")[$index] ?? null;
         abort_if(! $url, 404);
 
-        if ($src !== 'delfan') {
+        if ($src !== 'db2') {
             // Playstore links are already the signed file URL.
             return redirect()->away($url);
         }
@@ -193,10 +194,10 @@ class CatalogController extends Controller
             $people = $this->delfan($request)->searchCast($q);
             $error = null;
         } catch (Throwable $e) {
-            [$people, $error] = [[], $this->explain($e, 'delfan')];
+            [$people, $error] = [[], $this->explain($e, 'db2')];
         }
 
-        return view('delfan.cast', ['people' => $people, 'q' => $q, 'error' => $error, 'src' => 'delfan']);
+        return view('site.cast', ['people' => $people, 'q' => $q, 'error' => $error, 'src' => 'db2']);
     }
 
     public function castShow(Request $request, string $id)
@@ -207,23 +208,15 @@ class CatalogController extends Controller
             $r = $this->delfan($request)->castMovies($id, $page);
             $error = null;
         } catch (Throwable $e) {
-            [$r, $error] = [['items' => [], 'bio' => ''], $this->explain($e, 'delfan')];
+            [$r, $error] = [['items' => [], 'bio' => ''], $this->explain($e, 'db2')];
         }
 
-        return view('delfan.cast_show', [
+        return view('site.cast_show', [
             'items' => $r['items'], 'bio' => $r['bio'], 'name' => (string) $request->query('name', ''),
-            'id' => $id, 'page' => $page, 'error' => $error, 'src' => 'delfan',
+            'id' => $id, 'page' => $page, 'error' => $error, 'src' => 'db2',
         ]);
     }
 
-    public function reset(Request $request)
-    {
-        $this->delfan($request)->reset();
-        $request->session()->forget('links');
-        $request->session()->regenerate();
-
-        return redirect()->route('home')->with('status', 'Session cleared. A new anonymous login will be made on the next request.');
-    }
 
     /** Turn a failure into a message that says what to do, especially when hosts rotated. */
     private function explain(Throwable $e, string $src): string
@@ -234,10 +227,10 @@ class CatalogController extends Controller
         if (! $unreachable) {
             return $msg;
         }
-        $hint = $src === 'delfan'
-            ? 'The Delfan servers may have moved: update DELFAN_LOGIN_HOST / DELFAN_API_HOST in .env.'
-            : 'The playstore mirrors may have moved: update PLAYSTORE_HOSTS in .env.';
+        // Server-side detail (which .env setting to change) goes to the log, not the page.
+        logger()->warning('upstream unreachable', ['source' => $src, 'error' => $msg,
+            'hint' => $src === 'db2' ? 'update DELFAN_LOGIN_HOST / DELFAN_API_HOST' : 'update PLAYSTORE_HOSTS']);
 
-        return $msg.' '.$hint.' You can also switch to the other source above.';
+        return self::SOURCES[$src].' is not reachable right now. Try again later, or switch to the other database above.';
     }
 }

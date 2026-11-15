@@ -1,4 +1,4 @@
-@extends('delfan.layout')
+@extends('site.layout')
 
 @section('title', $name ?: 'Actor')
 
@@ -8,7 +8,7 @@
     @if ($bio && $page === 1) <pre dir="auto" class="muted">{{ $bio }}</pre> @endif
     @if (! $items && ! $error) <p class="muted">No titles for this person.</p> @endif
     <div class="grid">
-        @foreach ($items as $it) @include('delfan._card') @endforeach
+        @foreach ($items as $it) @include('site._card') @endforeach
     </div>
     <nav class="pager">
         @if ($page > 1)

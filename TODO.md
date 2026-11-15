@@ -43,6 +43,11 @@ signing as `internal/delfan` in the Go desktop app, and shows the results as web
 - [x] Error messages say which `.env` setting to update when servers have moved
 - [x] Tests: mirror failover, error envelope, image rewrite, my-subs episode address and gate, OpenSubtitles title filter
 
+- [x] Sources shown as "Database 1" / "Database 2" (URLs `/title/db1/...`, `/title/db2/...`); upstream names
+      never appear on the site. The "New session" button is removed: a stale login is renewed automatically.
+- [x] Image proxy `/img?u=<encrypted>`: hides upstream hosts, fixes http images on the https site, cached a day
+- [x] Production deploy files: `deploy/compose.yaml`, `deploy/deploy.sh`, GitHub Actions → GHCR, `DEPLOY.md` (codegeek.ir)
+
 ## Next
 
 - [ ] Delfan search filters (`type`, `genre`, `year_from`/`year_to`, `imdb`, `sort_by`): the accepted values are
@@ -50,7 +55,6 @@ signing as `internal/delfan` in the Go desktop app, and shows the results as web
 - [ ] Playstore genre pages: `get_movie_by_genre_id` needs a genre id, but detail responses only give genre
       names and urls. Find where the ids come from.
 - [ ] Short shared cache for home and slider results
-- [ ] Optional image proxy, so visitors' browsers don't contact the image hosts directly
 - [ ] Persian / RTL interface language
 - [ ] OpenSubtitles quota is per server IP on a website (5/day shared by all visitors). Show the remaining count,
       or default to my-subs.co (already the default).

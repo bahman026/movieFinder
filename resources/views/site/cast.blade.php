@@ -1,4 +1,4 @@
-@extends('delfan.layout')
+@extends('site.layout')
 
 @section('title', 'Actors')
 
@@ -12,7 +12,7 @@
     <div class="people">
         @foreach ($people as $p)
             <a class="card" href="{{ route('cast.show', [$p['id'], 'name' => $p['name']]) }}">
-                <img src="{{ $p['pic'] }}" alt="" loading="lazy" referrerpolicy="no-referrer">
+                <img src="{{ \App\Support\Img::url($p['pic']) }}" alt="" loading="lazy" referrerpolicy="no-referrer">
                 <div dir="auto">{{ $p['name'] }} <span class="muted">{{ $p['role'] }}</span></div>
             </a>
         @endforeach

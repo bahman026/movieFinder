@@ -12,7 +12,10 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // In production the only way in is the shared Caddy proxy on the private
+        // Docker network (no port is published), so its X-Forwarded-* headers are
+        // trusted: without this, links on an https page would be built as http://.
+        $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

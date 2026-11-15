@@ -1,4 +1,4 @@
-@extends('delfan.layout')
+@extends('site.layout')
 
 @section('title', $detail['title'] ?? 'Title')
 
@@ -9,7 +9,7 @@
     @else
         @php $n = 0; @endphp
         <div class="detail">
-            <img src="{{ $detail['poster'] }}" alt="" referrerpolicy="no-referrer">
+            <img src="{{ \App\Support\Img::url($detail['poster']) }}" alt="" referrerpolicy="no-referrer">
             <div>
                 <h1 dir="auto">{{ $detail['title'] }}</h1>
                 @if ($detail['local_title'] && $detail['local_title'] !== $detail['title'])
@@ -60,8 +60,8 @@
 
                 <section class="subs">
                     <h3>Subtitles</h3>
-                    <form action="{{ route('title', array_filter([$src, $detail['id'], 'kind' => $src === 'playstore' ? $detail['kind'] : null])) }}#subs" method="get" id="subs">
-                        @if ($src === 'playstore') <input type="hidden" name="kind" value="{{ $detail['kind'] }}"> @endif
+                    <form action="{{ route('title', array_filter([$src, $detail['id'], 'kind' => $src === 'db1' ? $detail['kind'] : null])) }}#subs" method="get" id="subs">
+                        @if ($src === 'db1') <input type="hidden" name="kind" value="{{ $detail['kind'] }}"> @endif
                         <select name="subs" aria-label="Subtitle source">
                             <option value="mysubs" @selected($subForm['provider'] === 'mysubs')>my-subs.co</option>
                             <option value="opensubtitles" @selected($subForm['provider'] === 'opensubtitles')>OpenSubtitles</option>

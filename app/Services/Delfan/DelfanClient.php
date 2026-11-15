@@ -240,7 +240,7 @@ class DelfanClient
         $auth = $login['infos'][0]['auth'] ?? '';
         if ($auth === '') {
             $this->reset();
-            throw new RuntimeException('Delfan login returned no session token.');
+            throw new RuntimeException('Login returned no session token.');
         }
 
         $state += [
@@ -258,7 +258,7 @@ class DelfanClient
             $this->roundtrip('vitrin', []);
         } catch (\Throwable $e) {
             $this->reset();
-            throw new RuntimeException('Delfan session seed failed: '.$e->getMessage(), 0, $e);
+            throw new RuntimeException('Session seed failed: '.$e->getMessage(), 0, $e);
         }
     }
 

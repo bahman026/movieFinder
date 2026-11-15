@@ -57,13 +57,9 @@
         <input type="search" name="q" value="{{ $q ?? '' }}" placeholder="Search titles" dir="auto">
         <button type="submit">Search</button>
     </form>
-    @if ($src === 'delfan')
+    @if ($src === 'db2')
         <a class="btn" href="{{ route('cast') }}">Actors</a>
     @endif
-    <form action="{{ route('reset') }}" method="post">
-        @csrf
-        <button type="submit" title="Drop the anonymous upstream session">New session</button>
-    </form>
 </header>
 <main>
     @if (session('status')) <p class="status">{{ session('status') }}</p> @endif

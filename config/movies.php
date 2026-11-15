@@ -3,7 +3,7 @@
 // Playstore API (internal/api in the Go app) and subtitle sources.
 // The Delfan source has its own file, config/delfan.php.
 return [
-    'default_source' => env('MOVIES_DEFAULT_SOURCE', 'playstore'), // playstore | delfan
+    'default_source' => env('MOVIES_DEFAULT_SOURCE', 'db1'), // db1 (playstore API) | db2 (Delfan API)
 
     'playstore' => [
         // Ordered mirror list, comma separated. The one that answered last is tried first.
