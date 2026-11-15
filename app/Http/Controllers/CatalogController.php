@@ -188,6 +188,17 @@ class CatalogController extends Controller
             return back()->with('error', 'Subtitle download failed: '.$e->getMessage());
         }
 
+        // ?name=Movie.2010.720p.fa saves the subtitle next to the video under the
+        // video's own name, so VLC, MX Player, PotPlayer and MPC load it by
+        // themselves. Text is UTF-8 with a BOM: Windows players then show
+        // Persian correctly instead of guessing a legacy code page.
+        if (($base = trim((string) $request->query('name'))) !== '') {
+            $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+            $ext = in_array($ext, ['srt', 'ass', 'ssa', 'vtt', 'sub'], true) ? $ext : 'srt';
+            $name = $base.'.'.$ext;
+            $data = "\xEF\xBB\xBF".preg_replace('/^\xEF\xBB\xBF/', '', Vtt::toUtf8($data, (string) $request->query('lang')));
+        }
+
         // An upstream-supplied name must not be able to break the header or path.
         $name = preg_replace('/[^\w.\- ]+/u', '_', basename($name)) ?: 'subtitle.srt';
 
@@ -278,6 +289,7 @@ class CatalogController extends Controller
         return view('site.watch', [
             'src' => $src, 'id' => $id, 'index' => $index, 'meta' => $meta, 'file' => $file,
             'label' => $meta['labels'][$index] ?? $file,
+            'fileBase' => pathinfo($file, PATHINFO_FILENAME),
             'streamUrl' => route('stream', ['t' => $token]),
             'directUrl' => $url,
             'formatWarning' => self::formatWarning($file),
