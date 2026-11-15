@@ -15,6 +15,12 @@ fi
 [[ -f .env.production ]] || { echo ".env.production missing (needs APP_KEY, OPENSUBTITLES_API_KEY, APP_URL)" >&2; exit 1; }
 export IMAGE_TAG
 
+# Pull anonymously (the GHCR package is public). The server's shared
+# ~/.docker/config.json holds togamode's GHCR login, which GHCR rejects for
+# this package, and it must not be changed - so use a private, empty config.
+mkdir -p .docker && [[ -f .docker/config.json ]] || echo '{}' > .docker/config.json
+export DOCKER_CONFIG="$PWD/.docker"
+
 echo "== disk before"; df -h / | tail -1
 
 docker compose pull web
