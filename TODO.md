@@ -48,7 +48,20 @@ signing as `internal/delfan` in the Go desktop app, and shows the results as web
 - [x] Image proxy `/img?u=<encrypted>`: hides upstream hosts, fixes http images on the https site, cached a day
 - [x] Production deploy files: `deploy/compose.yaml`, `deploy/deploy.sh`, GitHub Actions → GHCR, `DEPLOY.md` (codegeek.ir)
 
+- [x] Rate limits fixed: named limiters (pages, heavy, img, stream), each with its own counter. The shared
+      per-IP counter made every page with posters answer 429.
+- [x] Watch in the browser: `/watch/...` page with a video player streamed through `/stream` (Range passed
+      through, chunked, flat memory, upstream cancelled when the viewer leaves; encrypted expiring token, no session)
+- [x] Subtitle in the player: search and **Use** a my-subs.co / OpenSubtitles subtitle (served as UTF-8 WebVTT,
+      Windows-1256 converted, cached a day), or load your own .srt/.vtt (converted in the browser, never uploaded)
+- [x] Separate buttons: Watch / Download (through the site, as an attachment) / Direct link (for VLC/PotPlayer),
+      and the subtitle download stays separate
+- [x] x265/HEVC files show a notice (browsers can't decode them); a playback error points to Download / Direct link
+
 ## Next
+
+- [ ] Streaming goes through the VPS, so every viewer uses server bandwidth and one PHP worker (16 in production).
+      Watch traffic; move video to a dedicated proxy (e.g. nginx) if it grows.
 
 - [ ] Delfan search filters (`type`, `genre`, `year_from`/`year_to`, `imdb`, `sort_by`): the accepted values are
       not known yet. Read them from the app or capture real requests before adding a form.

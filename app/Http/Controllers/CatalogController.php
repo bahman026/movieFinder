@@ -6,6 +6,10 @@ use App\Services\Delfan\DelfanClient;
 use App\Services\Playstore\PlaystoreClient;
 use App\Services\Subtitles\MySubsClient;
 use App\Services\Subtitles\OpenSubtitlesClient;
+use App\Support\StreamToken;
+use App\Support\Vtt;
+use Illuminate\Support\Facades\Cache;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Illuminate\Http\Request;
 use Throwable;
 
@@ -98,6 +102,13 @@ class CatalogController extends Controller
             array_push($all, ...$s['episodes']);
         }
         $request->session()->put("links.$src.$id", array_column($all, 'url'));
+        // What the watch page needs to search subtitles, without another upstream call.
+        $request->session()->put("titles.$src.$id", [
+            'title' => $detail['title'], 'original_title' => $detail['original_title'],
+            'local_title' => $detail['local_title'], 'imdb_id' => $detail['imdb_id'],
+            'year' => $detail['year'], 'is_movie' => $detail['is_movie'], 'kind' => $detail['kind'],
+            'labels' => array_map(fn ($l) => trim($l['name'].' '.$l['size']), $all),
+        ]);
 
         [$subs, $subError, $subForm] = $this->subtitles($request, $detail);
 
@@ -109,15 +120,15 @@ class CatalogController extends Controller
     }
 
     /** Subtitle search for the title page, run only when the form was submitted. */
-    private function subtitles(Request $request, array $detail): array
+    private function subtitles(Request $request, array $detail, int $defSeason = 0, int $defEpisode = 0): array
     {
         $form = [
             'provider' => in_array($request->query('subs'), ['mysubs', 'opensubtitles'], true)
                 ? $request->query('subs') : config('movies.subtitles.default_provider'),
             'lang' => array_key_exists((string) $request->query('lang'), config('movies.subtitles.languages'))
                 ? $request->query('lang') : 'en',
-            'season' => max(0, (int) $request->query('season', 0)),
-            'episode' => max(0, (int) $request->query('episode', 0)),
+            'season' => max(0, (int) $request->query('season', $defSeason)),
+            'episode' => max(0, (int) $request->query('episode', $defEpisode)),
             'searched' => $request->has('subs'),
         ];
         if (! $form['searched']) {
@@ -144,19 +155,35 @@ class CatalogController extends Controller
         }
     }
 
+    /**
+     * One subtitle file, cached for a day: the player asks for the track again on
+     * every play, and each OpenSubtitles fetch costs one of the 5 daily downloads.
+     *
+     * @return array{0: string, 1: string} [content, file name]
+     */
+    private function fetchSubtitle(string $provider, string $ref): array
+    {
+        abort_unless(in_array($provider, ['opensubtitles', 'mysubs'], true), 404);
+        abort_if($provider === 'opensubtitles' && ! ctype_digit($ref), 404);
+
+        $key = 'sub:'.sha1($provider.'|'.$ref);
+        if ($hit = Cache::get($key)) {
+            return [base64_decode($hit[0]), $hit[1]];
+        }
+        [$data, $name] = $provider === 'opensubtitles'
+            ? (new OpenSubtitlesClient(config('movies.subtitles.opensubtitles_key')))->download((int) $ref)
+            : (new MySubsClient(config('movies.subtitles.mysubs_base')))->download($ref);
+        Cache::put($key, [base64_encode($data), $name], 86400);
+
+        return [$data, $name];
+    }
+
     public function subtitleDownload(Request $request)
     {
-        $provider = (string) $request->query('provider');
-        $ref = (string) $request->query('ref');
-
         try {
-            [$data, $name] = match ($provider) {
-                'opensubtitles' => ctype_digit($ref)
-                    ? (new OpenSubtitlesClient(config('movies.subtitles.opensubtitles_key')))->download((int) $ref)
-                    : abort(404),
-                'mysubs' => (new MySubsClient(config('movies.subtitles.mysubs_base')))->download($ref),
-                default => abort(404),
-            };
+            [$data, $name] = $this->fetchSubtitle((string) $request->query('provider'), (string) $request->query('ref'));
+        } catch (HttpException $e) {
+            throw $e;
         } catch (Throwable $e) {
             return back()->with('error', 'Subtitle download failed: '.$e->getMessage());
         }
@@ -170,18 +197,95 @@ class CatalogController extends Controller
         ]);
     }
 
-    public function resolve(Request $request, string $src, string $id, int $index)
+    /** The chosen subtitle as UTF-8 WebVTT for the player's <track>. */
+    public function subtitleVtt(Request $request)
+    {
+        try {
+            [$data] = $this->fetchSubtitle((string) $request->query('provider'), (string) $request->query('ref'));
+            $vtt = Vtt::fromSubtitle($data, (string) $request->query('lang'));
+        } catch (HttpException $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            return response("WEBVTT\n\nNOTE ".str_replace("\n", ' ', $e->getMessage())."\n", 200, ['Content-Type' => 'text/vtt; charset=utf-8']);
+        }
+
+        return response($vtt, 200, ['Content-Type' => 'text/vtt; charset=utf-8', 'Cache-Control' => 'private, max-age=3600']);
+    }
+
+    /** The playable URL behind link $index of a title shown in this session. */
+    private function playUrl(Request $request, string $src, string $id, int $index): string
     {
         $url = $request->session()->get("links.$src.$id")[$index] ?? null;
         abort_if(! $url, 404);
 
-        if ($src !== 'db2') {
-            // Playstore links are already the signed file URL.
-            return redirect()->away($url);
+        // Database 1 links are already the signed file URL; Database 2 links
+        // are play.php redirects that are resolved here.
+        return $src === 'db2' ? $this->delfan($request)->resolve($url) : $url;
+    }
+
+    private static function fileName(string $url): string
+    {
+        return rawurldecode(basename((string) parse_url($url, PHP_URL_PATH))) ?: 'video.mp4';
+    }
+
+    public function watch(Request $request, string $src, string $id, int $index)
+    {
+        $meta = $request->session()->get("titles.$src.$id");
+        if (! $meta) {
+            return redirect()->route('title', array_filter([$src, $id, 'kind' => $request->query('kind')]));
+        }
+        try {
+            $url = $this->playUrl($request, $src, $id, $index);
+        } catch (HttpException $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            return redirect()->route('title', [$src, $id])->with('error', $e->getMessage());
+        }
+        $file = self::fileName($url);
+        $token = StreamToken::make($url, $file);
+
+        // An episode's file name carries SxxEyy: prefill the subtitle search with it.
+        [$season, $episode] = preg_match('/S(\d{1,2})[ ._-]?E(\d{1,3})/i', $file, $m) ? [(int) $m[1], (int) $m[2]] : [0, 0];
+        [$subs, $subError, $subForm] = $this->subtitles($request, $meta, $season, $episode);
+
+        $chosen = null;
+        if (preg_match('/^(mysubs|opensubtitles):(.+)$/', (string) $request->query('sub'), $m)) {
+            $chosen = ['provider' => $m[1], 'ref' => $m[2], 'label' => (string) $request->query('sublabel', 'Subtitle')];
         }
 
+        return view('site.watch', [
+            'src' => $src, 'id' => $id, 'index' => $index, 'meta' => $meta, 'file' => $file,
+            'label' => $meta['labels'][$index] ?? $file,
+            'streamUrl' => route('stream', ['t' => $token]),
+            'downloadUrl' => route('stream', ['t' => $token, 'dl' => 1]),
+            'directUrl' => $url,
+            'browserPlayable' => ! preg_match('/x265|hevc|h\.?265/i', $file),
+            'subs' => $subs, 'subError' => $subError, 'subForm' => $subForm, 'chosen' => $chosen,
+            'languages' => config('movies.subtitles.languages'),
+        ]);
+    }
+
+    /** Download through this site (the file hosts are http-only; an https page would warn). */
+    public function download(Request $request, string $src, string $id, int $index)
+    {
         try {
-            return redirect()->away($this->delfan($request)->resolve($url));
+            $url = $this->playUrl($request, $src, $id, $index);
+        } catch (HttpException $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            return back()->with('error', $e->getMessage());
+        }
+
+        return redirect()->route('stream', ['t' => StreamToken::make($url, self::fileName($url)), 'dl' => 1]);
+    }
+
+    /** Direct link to the file, for an external player such as VLC or PotPlayer. */
+    public function resolve(Request $request, string $src, string $id, int $index)
+    {
+        try {
+            return redirect()->away($this->playUrl($request, $src, $id, $index));
+        } catch (HttpException $e) {
+            throw $e;
         } catch (Throwable $e) {
             return back()->with('error', $e->getMessage());
         }
