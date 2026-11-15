@@ -18,6 +18,11 @@ services:
       # Watch pages on http so the player streams straight from the movie hosts
       # (no video traffic here). Needs the http://codegeek.ir Caddy block.
       WATCH_OVER_HTTP: "true"
+      # The http Watch page must see the same session as the https pages (it
+      # holds which links the title offered). Left empty, Laravel marks the
+      # cookie Secure on https and the browser would withhold it on http. The
+      # session holds only the anonymous Database 2 login and page state.
+      SESSION_SECURE_COOKIE: "false"
     # No public port: Caddy (togamode_edge_proxy) reaches moviefinder_web:8080 over togamode_edge.
     networks: [edge]
     mem_limit: 384m   # streaming is chunked (flat memory); this covers 16 idle workers
