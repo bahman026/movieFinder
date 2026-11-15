@@ -14,20 +14,24 @@
     @endunless
 
     <section class="player">
-        <video id="player" controls preload="metadata" playsinline crossorigin="anonymous">
-            <source src="{{ $streamUrl }}">
+        {{-- Straight from the database host: no traffic on this server. No crossorigin
+             attribute: the hosts send no CORS headers, and the subtitle track is same-origin. --}}
+        <video id="player" controls preload="metadata" playsinline data-direct="{{ $directUrl }}" data-via="{{ $streamUrl }}">
+            <source src="{{ $directUrl }}">
             @if ($chosen)
                 <track kind="subtitles" label="{{ $chosen['label'] }}" srclang="{{ $subForm['lang'] }}" default
                        src="{{ route('subtitles.vtt', ['provider' => $chosen['provider'], 'ref' => $chosen['ref'], 'lang' => $subForm['lang']]) }}">
             @endif
         </video>
-        <p id="playError" class="error" hidden>The browser can't play this file (usually an MKV with x265 or an unsupported audio track).
-            Use Download, or open the Direct link in VLC or PotPlayer.</p>
+        <p id="playError" class="error" hidden>The video didn't load straight from the database host.
+            Try <strong>Play via codegeek</strong> below (uses this server's traffic), or Download / Open in VLC.
+            An MKV with x265 can't play in a browser at all.</p>
 
         <div class="bar">
-            <a class="btn" href="{{ $downloadUrl }}" rel="nofollow">⬇ Download video</a>
-            <a class="btn ghost" href="{{ $directUrl }}" rel="noreferrer nofollow" title="For VLC, PotPlayer or a download manager">Direct link</a>
-            <button type="button" class="btn" id="copyLink" data-url="{{ $directUrl }}">Copy direct link</button>
+            <a class="btn" href="{{ $directUrl }}" rel="noreferrer nofollow" title="Direct from the database host: no traffic on this server. If the browser warns, choose Keep.">⬇ Download video</a>
+            <button type="button" class="btn" id="copyLink" data-url="{{ $directUrl }}" title="For IDM, ADM, VLC or PotPlayer">Copy link</button>
+            <button type="button" class="btn ghost" id="viaSite" title="Fallback if the direct stream fails: the video then goes through codegeek.ir and uses its traffic">Play via codegeek</button>
+            <a class="btn ghost" href="vlc://{{ $directUrl }}" title="Opens the VLC app on a phone or tablet, streaming straight from the database host">Open in VLC</a>
             <span class="muted" id="curSubBox" @unless ($chosen) hidden @endunless>Subtitle: <span dir="auto" id="curSub">{{ $chosen['label'] ?? '' }}</span></span>
             <a class="btn ghost" id="curSubDl" rel="nofollow" @if ($chosen) href="{{ route('subtitles.download', ['provider' => $chosen['provider'], 'ref' => $chosen['ref']]) }}" @else hidden @endif>⬇ Download subtitle</a>
             <button type="button" class="btn ghost" id="subOff" @unless ($chosen) hidden @endunless>Subtitle off</button>
@@ -95,6 +99,21 @@
             // A <source> error does not bubble to the video element; listen on it too.
             var source = video.querySelector('source');
             if (source) source.addEventListener('error', function () { document.getElementById('playError').hidden = false; });
+
+            // Fallback: switch the same player to the through-the-server stream, keeping the position.
+            document.getElementById('viaSite').addEventListener('click', function () {
+                var at = video.currentTime || 0, wasPlaying = !video.paused;
+                var source = video.querySelector('source');
+                source.src = video.dataset.via;
+                video.load();
+                video.addEventListener('loadedmetadata', function once() {
+                    video.removeEventListener('loadedmetadata', once);
+                    if (at) video.currentTime = at;
+                    if (wasPlaying || at === 0) video.play().catch(function () {});
+                });
+                document.getElementById('playError').hidden = true;
+                this.disabled = true; this.textContent = 'Playing via codegeek';
+            });
 
             document.getElementById('copyLink').addEventListener('click', function () {
                 var btn = this;

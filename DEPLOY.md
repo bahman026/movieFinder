@@ -63,17 +63,23 @@ To take the site down completely without touching anything else:
 3. **DNS**: an A record for `codegeek.ir` only (no subdomains) pointing to `87.107.104.19`. On Cloudflare it must be
    DNS only (grey cloud). It must resolve before the Caddy reload.
 4. **First deploy**: `IMAGE_TAG=<sha> ./deploy.sh` (manual command above).
-5. **Caddy** (done 2026-11-15): appended at the end of `~/togamode-edge/infrastructure/production/Caddyfile`:
-   ```
-   # --- codegeek.ir ---
-   codegeek.ir {
-         import common
-         reverse_proxy moviefinder_web:8080
-   }
-   ```
-   It's the apex domain only. `www`, `shop` and `admin.codegeek.ir` are retired: their DNS records are deleted and
-   togamode's two legacy codegeek redirect blocks were removed from the Caddyfile. The proxy's env still has
-   `LEGACY_SHOP_DOMAINS` / `LEGACY_ADMIN_DOMAINS`, but nothing reads them now.
+5. **Caddy** (live since 2026-11-15). At the end of `~/togamode-edge/infrastructure/production/Caddyfile`:
+   - `codegeek.ir { ... }`: the same headers as the shared `common` snippet, **but HSTS is `max-age=0`**
+     instead of one year, and it reverse-proxies to `moviefinder_web:8080`.
+   - `http://codegeek.ir { ... }`: plain http **only** for `/watch/*`, `/subtitles/*` and `/stream`. Every other
+     path redirects to https.
+
+   Why: the movie file hosts are http-only. On an https page the browser blocks their video, so the Watch page is
+   served over http (`WATCH_OVER_HTTP=true` in `compose.yaml`), and the player streams straight from the host, at
+   zero traffic on this server. HSTS would force https and break that, so it's off for codegeek.ir only.
+   **Order matters:** the Caddy blocks must be live before `WATCH_OVER_HTTP` is on, or Watch redirects in a loop.
+   Downloads, Copy link and Open in VLC are direct too. "Play via codegeek" on the Watch page is the only path that
+   carries video through the server, as a fallback.
+
+   The apex domain only: `www`, `shop` and `admin.codegeek.ir` are retired (DNS records deleted, togamode's legacy
+   codegeek blocks removed). The proxy env still has `LEGACY_SHOP_DOMAINS` / `LEGACY_ADMIN_DOMAINS`, but nothing
+   reads them.
+
    Steps for any later edit: `cp Caddyfile Caddyfile.bak-$(date +%F-%H%M)`, write the file **in place**
    (`cat new > Caddyfile`, not `mv`, so the bind mount keeps working), then
    `docker exec togamode_edge_proxy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`, then

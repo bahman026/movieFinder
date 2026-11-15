@@ -18,8 +18,6 @@ Route::middleware('throttle:heavy')->group(function () {
     Route::get('/title/{src}/{id}/link/{index}', [CatalogController::class, 'resolve'])
         ->whereIn('src', array_keys(CatalogController::SOURCES))->whereNumber(['id', 'index'])->name('resolve');
     Route::get('/subtitles/download', [CatalogController::class, 'subtitleDownload'])->name('subtitles.download');
-    Route::get('/title/{src}/{id}/download/{index}', [CatalogController::class, 'download'])
-        ->whereIn('src', array_keys(CatalogController::SOURCES))->whereNumber(['id', 'index'])->name('download');
 });
 
 Route::middleware('throttle:pages')->group(function () {

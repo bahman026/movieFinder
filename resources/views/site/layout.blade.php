@@ -72,5 +72,19 @@
     @if (session('error')) <p class="error">{{ session('error') }}</p> @endif
     @yield('content')
 </main>
+<script>
+    // "Copy link": ask this site for the file address (Database 2 links need resolving), then copy it.
+    document.addEventListener('click', function (e) {
+        var b = e.target.closest && e.target.closest('[data-copy-resolve]');
+        if (!b) return;
+        var label = b.textContent;
+        b.textContent = '…';
+        fetch(b.dataset.copyResolve, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+            .then(function (r) { return r.json(); })
+            .then(function (j) { if (!j.url) throw 0; return navigator.clipboard.writeText(j.url); })
+            .then(function () { b.textContent = 'Copied'; }, function () { b.textContent = 'Failed'; })
+            .then(function () { setTimeout(function () { b.textContent = label; }, 2000); });
+    });
+</script>
 </body>
 </html>

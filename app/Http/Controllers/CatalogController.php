@@ -230,6 +230,11 @@ class CatalogController extends Controller
 
     public function watch(Request $request, string $src, string $id, int $index)
     {
+        // Direct streaming needs an http page (see config movies.watch_over_http).
+        if (config('movies.watch_over_http') && $request->secure()) {
+            return redirect()->to(preg_replace('#^https://#i', 'http://', $request->fullUrl()));
+        }
+
         $meta = $request->session()->get("titles.$src.$id");
         if (! $meta) {
             return redirect()->route('title', array_filter([$src, $id, 'kind' => $request->query('kind')]));
@@ -257,7 +262,6 @@ class CatalogController extends Controller
             'src' => $src, 'id' => $id, 'index' => $index, 'meta' => $meta, 'file' => $file,
             'label' => $meta['labels'][$index] ?? $file,
             'streamUrl' => route('stream', ['t' => $token]),
-            'downloadUrl' => route('stream', ['t' => $token, 'dl' => 1]),
             'directUrl' => $url,
             'browserPlayable' => ! preg_match('/x265|hevc|h\.?265/i', $file),
             'subs' => $subs, 'subError' => $subError, 'subForm' => $subForm, 'chosen' => $chosen,
@@ -265,30 +269,20 @@ class CatalogController extends Controller
         ]);
     }
 
-    /** Download through this site (the file hosts are http-only; an https page would warn). */
-    public function download(Request $request, string $src, string $id, int $index)
+    /** Direct link to the file, for an external player such as VLC or PotPlayer. */
+    public function resolve(Request $request, string $src, string $id, int $index)
     {
         try {
             $url = $this->playUrl($request, $src, $id, $index);
         } catch (HttpException $e) {
             throw $e;
         } catch (Throwable $e) {
-            return back()->with('error', $e->getMessage());
+            return $request->boolean('json')
+                ? response()->json(['error' => $e->getMessage()], 502)
+                : back()->with('error', $e->getMessage());
         }
 
-        return redirect()->route('stream', ['t' => StreamToken::make($url, self::fileName($url)), 'dl' => 1]);
-    }
-
-    /** Direct link to the file, for an external player such as VLC or PotPlayer. */
-    public function resolve(Request $request, string $src, string $id, int $index)
-    {
-        try {
-            return redirect()->away($this->playUrl($request, $src, $id, $index));
-        } catch (HttpException $e) {
-            throw $e;
-        } catch (Throwable $e) {
-            return back()->with('error', $e->getMessage());
-        }
+        return $request->boolean('json') ? response()->json(['url' => $url]) : redirect()->away($url);
     }
 
     public function cast(Request $request)
