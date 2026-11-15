@@ -9,4 +9,4 @@ fi
 php artisan config:cache >/dev/null
 php artisan route:cache >/dev/null
 php artisan view:cache >/dev/null
-exec php -S 0.0.0.0:8080 -t public vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php
+cd public && exec php -S 0.0.0.0:8080 ../vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php
