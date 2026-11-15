@@ -40,6 +40,12 @@
         input[type=number] { width:80px; }
         .tags { display:flex; flex-wrap:wrap; gap:6px; }
         .tags span { border:1px solid var(--line); border-radius:999px; padding:2px 10px; font-size:13px; }
+        .actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+        .btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+        .btn.ghost { border-style:dashed; }
+        .player video { width:100%; max-height:75vh; background:#000; border-radius:8px; }
+        .player .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0; }
+        .notice { border:1px solid var(--line); border-left:4px solid var(--accent); padding:10px; border-radius:6px; }
         .people { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:14px; }
     </style>
 </head>

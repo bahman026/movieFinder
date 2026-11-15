@@ -36,7 +36,7 @@
                     <ul class="links">
                         @forelse ($detail['links'] as $l)
                             <li><span dir="auto">{{ $l['name'] ?: 'Link '.($n + 1) }} <span class="muted">{{ $l['size'] }}</span></span>
-                                <a class="btn" href="{{ route('resolve', [$src, $detail['id'], $n++]) }}" rel="noreferrer">Open</a></li>
+                                @include('site._link_actions', ['i' => $n++])</li>
                         @empty
                             <li class="muted">No links.</li>
                         @endforelse
@@ -49,7 +49,7 @@
                             <ul class="links">
                                 @foreach ($s['episodes'] as $l)
                                     <li><span dir="auto">{{ $l['name'] }} <span class="muted">{{ $l['size'] }}</span></span>
-                                        <a class="btn" href="{{ route('resolve', [$src, $detail['id'], $n++]) }}" rel="noreferrer">Open</a></li>
+                                        @include('site._link_actions', ['i' => $n++])</li>
                                 @endforeach
                             </ul>
                         </details>
