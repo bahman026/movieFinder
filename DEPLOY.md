@@ -65,6 +65,11 @@ To take the site down completely without touching anything else:
 4. **First deploy**: `IMAGE_TAG=<sha> ./deploy.sh` (manual command above).
 5. **Caddy**: append, never rewrite, at the end of `~/togamode-edge/infrastructure/production/Caddyfile`:
    ```
+   **First:** `codegeek.ir` and `www.codegeek.ir` were aliases in togamode's block that redirect to togamode.ir
+   (`shop.` and `admin.codegeek.ir` too). Remove only `codegeek.ir` and `www.codegeek.ir` from that block's
+   site-address line and leave everything else as it is. Otherwise Caddy rejects the duplicate addresses.
+   This is the one edit to an existing block, approved for this deploy.
+
    # --- codegeek.ir ---
    # moviefinder (deployed in ~/moviefinder), shares this proxy because it owns 80/443.
    codegeek.ir {
