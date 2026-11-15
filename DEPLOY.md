@@ -48,9 +48,9 @@ To take the site down completely without touching anything else:
 
 ## First-time setup (once)
 
-1. **GHCR**: after the first workflow run, set the `moviefinder-web` package to Public in GitHub
-   (Packages → package settings), so the server can pull it without a login. Or log the server in with a
-   read-only token: `docker login ghcr.io`.
+1. **GHCR**: the `moviefinder-web` package is Public. `deploy.sh` pulls it anonymously through its own
+   `~/moviefinder/.docker` config, because the server's shared `~/.docker/config.json` holds togamode's GHCR
+   login, which GHCR rejects for this package. Don't change the shared login.
 2. **Server files**:
    ```bash
    ssh -p 9011 deploy@87.107.104.19 'bash -s' <<'EOF'
@@ -60,31 +60,25 @@ To take the site down completely without touching anything else:
    ```
    Then create `~/moviefinder/.env.production` (mode 600) from `deploy/.env.production.example`:
    `APP_URL`, a fixed `APP_KEY`, and `OPENSUBTITLES_API_KEY`.
-3. **DNS**: an A record for `codegeek.ir` and `www.codegeek.ir` pointing to `87.107.104.19`. On Cloudflare it must be
+3. **DNS**: an A record for `codegeek.ir` only (no subdomains) pointing to `87.107.104.19`. On Cloudflare it must be
    DNS only (grey cloud). It must resolve before the Caddy reload.
 4. **First deploy**: `IMAGE_TAG=<sha> ./deploy.sh` (manual command above).
-5. **Caddy**: append, never rewrite, at the end of `~/togamode-edge/infrastructure/production/Caddyfile`:
+5. **Caddy** (done 2026-11-15): appended at the end of `~/togamode-edge/infrastructure/production/Caddyfile`:
    ```
-   **First:** `codegeek.ir` and `www.codegeek.ir` were aliases in togamode's block that redirect to togamode.ir
-   (`shop.` and `admin.codegeek.ir` too). Remove only `codegeek.ir` and `www.codegeek.ir` from that block's
-   site-address line and leave everything else as it is. Otherwise Caddy rejects the duplicate addresses.
-   This is the one edit to an existing block, approved for this deploy.
-
    # --- codegeek.ir ---
-   # moviefinder (deployed in ~/moviefinder), shares this proxy because it owns 80/443.
    codegeek.ir {
          import common
          reverse_proxy moviefinder_web:8080
    }
-
-   www.codegeek.ir {
-         import common
-         redir https://codegeek.ir{uri} permanent
-   }
    ```
-   Steps: `cp Caddyfile Caddyfile.bak-$(date +%F-%H%M)`, append, `diff` against the backup, then
+   It's the apex domain only. `www`, `shop` and `admin.codegeek.ir` are retired: their DNS records are deleted and
+   togamode's two legacy codegeek redirect blocks were removed from the Caddyfile. The proxy's env still has
+   `LEGACY_SHOP_DOMAINS` / `LEGACY_ADMIN_DOMAINS`, but nothing reads them now.
+   Steps for any later edit: `cp Caddyfile Caddyfile.bak-$(date +%F-%H%M)`, write the file **in place**
+   (`cat new > Caddyfile`, not `mv`, so the bind mount keeps working), then
    `docker exec togamode_edge_proxy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`, then
    `docker exec togamode_edge_proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
+   Check the whole validate output for "Valid configuration"; info log lines can print after it.
    Never restart or recreate the proxy container.
 
 ## Verify
