@@ -36,7 +36,8 @@
                     title="Downloads the video and the selected subtitle with matching names: VLC, MX Player and PotPlayer show the subtitle automatically">⬇ Video + subtitle</button>
             <button type="button" class="btn" id="copyLink" data-url="{{ $directUrl }}" title="For IDM, ADM, VLC or PotPlayer">Copy link</button>
             <button type="button" class="btn ghost" id="viaSite" title="Fallback if the direct stream fails: the video then goes through codegeek.ir and uses its traffic">Play via codegeek</button>
-            <a class="btn ghost" href="vlc://{{ $directUrl }}" title="Opens the VLC app on a phone or tablet, streaming straight from the database host">Open in VLC</a>
+            <a class="btn ghost" href="{{ $renamedUrl }}" rel="nofollow" title="Saves the video as {{ $file }}. It goes through codegeek.ir and uses its traffic; the direct download keeps the host's name, which can't be changed">⬇ Renamed (via codegeek)</a>
+            <a class="btn ghost" id="vlcLink" href="vlc://{{ $directUrl }}" data-url="{{ $directUrl }}" data-title="{{ $file }}" title="Opens the VLC app, streaming straight from the database host, with the selected subtitle (Android and iPhone)">Open in VLC</a>
             <span class="muted" id="curSubBox" @unless ($chosen) hidden @endunless>Subtitle: <span dir="auto" id="curSub">{{ $chosen['label'] ?? '' }}</span></span>
             <a class="btn ghost" id="curSubDl" rel="nofollow" @if ($chosen) href="{{ route('subtitles.download', ['provider' => $chosen['provider'], 'ref' => $chosen['ref'], 'lang' => $subForm['lang'], 'name' => $fileBase.'.'.$subForm['lang']]) }}" @else hidden @endif>⬇ Download subtitle</a>
             <button type="button" class="btn ghost" id="subOff" @unless ($chosen) hidden @endunless>Subtitle off</button>
@@ -190,6 +191,7 @@
                     curDl.hidden = false;
                 } else { curDl.hidden = true; curDl.removeAttribute('href'); }
                 dlBoth.hidden = !dlUrl;
+                updateVlc(dlUrl ? curDl.href : null);
             }
             off.addEventListener('click', function () { setTrack(null); });
 
@@ -197,6 +199,25 @@
             // then the subtitle under the video's name. Two separate downloads; browsers may
             // ask once to allow multiple downloads from this site.
             var dlBoth = document.getElementById('dlBoth');
+
+            // Open in VLC with the selected subtitle. Android: an intent with VLC's
+            // subtitles_location extra; iPhone/iPad: VLC's x-callback "sub" parameter.
+            // Desktop browsers only know vlc://, which carries no subtitle.
+            var vlc = document.getElementById('vlcLink'), ua = navigator.userAgent;
+            var isAndroid = /Android/i.test(ua), isIOS = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+            function updateVlc(subUrl) {
+                var url = vlc.dataset.url, e = encodeURIComponent;
+                if (isAndroid) {
+                    var m = url.match(/^(https?):\/\/(.*)$/);
+                    vlc.href = 'intent://' + m[2] + '#Intent;scheme=' + m[1] + ';type=video/*;package=org.videolan.vlc;'
+                        + 'S.title=' + e(vlc.dataset.title) + ';' + (subUrl ? 'S.subtitles_location=' + e(subUrl) + ';' : '') + 'end';
+                } else if (isIOS) {
+                    vlc.href = 'vlc-x-callback://x-callback-url/stream?url=' + e(url) + (subUrl ? '&sub=' + e(subUrl) : '');
+                } else {
+                    vlc.href = 'vlc://' + url;
+                }
+            }
+            updateVlc(curDl.hasAttribute('href') ? curDl.href : null);
             function clickLink(href) {
                 var a = document.createElement('a');
                 a.href = href; a.rel = 'noreferrer'; a.style.display = 'none';

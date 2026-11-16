@@ -6,6 +6,7 @@ use App\Services\Delfan\DelfanClient;
 use App\Services\Playstore\PlaystoreClient;
 use App\Services\Subtitles\MySubsClient;
 use App\Services\Subtitles\OpenSubtitlesClient;
+use App\Support\FileName;
 use App\Support\StreamToken;
 use App\Support\Vtt;
 use Illuminate\Support\Facades\Cache;
@@ -274,7 +275,8 @@ class CatalogController extends Controller
         } catch (Throwable $e) {
             return redirect()->route('title', [$src, $id])->with('error', $e->getMessage());
         }
-        $file = self::fileName($url);
+        $original = self::fileName($url);
+        $file = FileName::clean($original);
         $token = StreamToken::make($url, $file);
 
         // An episode's file name carries SxxEyy: prefill the subtitle search with it.
@@ -289,8 +291,11 @@ class CatalogController extends Controller
         return view('site.watch', [
             'src' => $src, 'id' => $id, 'index' => $index, 'meta' => $meta, 'file' => $file,
             'label' => $meta['labels'][$index] ?? $file,
-            'fileBase' => pathinfo($file, PATHINFO_FILENAME),
+            // A direct download keeps the host's name (the path is signed, so it cannot
+            // be renamed), and the subtitle must match it for players to load it.
+            'fileBase' => pathinfo($original, PATHINFO_FILENAME),
             'streamUrl' => route('stream', ['t' => $token]),
+            'renamedUrl' => route('stream', ['t' => $token, 'dl' => 1]),
             'directUrl' => $url,
             'formatWarning' => self::formatWarning($file),
             'subs' => $subs, 'subError' => $subError, 'subForm' => $subForm, 'chosen' => $chosen,
