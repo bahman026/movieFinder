@@ -80,4 +80,59 @@ class PlaystoreClientTest extends TestCase
         $this->assertSame('1.5 GB', $d['links'][0]['size']);
         $this->assertSame('فیلم', $d['local_title']);
     }
+
+    public function test_newest_list_follows_the_latest_year_and_top_is_found_by_name(): void
+    {
+        Http::fake(function (Request $r) {
+            if (str_contains($r->url(), 'get_all_genre')) {
+                return Http::response([
+                    ['genre_id' => '405', 'name' => 'آخرین های 2025'],
+                    ['genre_id' => '500', 'name' => 'آخرین های 2027'],
+                    ['genre_id' => '409', 'name' => 'سریال های 2026'],
+                    ['genre_id' => '95', 'name' => '250 فیلم برتر⭐⭐⭐'],
+                    ['genre_id' => '401', 'name' => '250 سریال برتر'],
+                ]);
+            }
+
+            return Http::response([['videos_id' => $r['id'].'-'.$r['page'], 'title' => 'T']]);
+        });
+
+        $this->assertSame('500', $this->client()->listGenreId('newest'));
+        $this->assertSame('95', $this->client()->listGenreId('top'));
+        $this->assertSame('401', $this->client()->listGenreId('top-series'));
+        $this->assertSame('95-2', $this->client()->curated('top', 2)[0]['id']);
+    }
+
+    public function test_lists_fall_back_to_known_ids_when_the_genre_list_fails(): void
+    {
+        Http::fake(['*' => Http::response('nope', 404)]);
+        $this->assertSame('408', $this->client()->listGenreId('newest'));
+    }
+
+    public function test_home_shows_newest_and_top_rows_and_a_see_all_page(): void
+    {
+        config(['movies.playstore.hosts' => 'http://a.test', 'movies.default_source' => 'db1']);
+        Http::fake(function (Request $r) {
+            $url = $r->url();
+            if (str_contains($url, 'get_all_genre')) {
+                return Http::response([['genre_id' => '408', 'name' => 'آخرین های 2026'], ['genre_id' => '95', 'name' => '250 فیلم برتر']]);
+            }
+            if (str_contains($url, 'get_movie_by_genre_id')) {
+                return Http::response([['videos_id' => '1', 'title' => 'Genre'.$r['id'].'P'.$r['page']]]);
+            }
+            if (str_contains($url, 'get_slider')) {
+                return Http::response(['data' => []]);
+            }
+
+            return Http::response([['videos_id' => '2', 'title' => 'Recent']]);
+        });
+
+        $this->get('/')->assertOk()
+            ->assertSeeInOrder(['Newest movies', 'Genre408P1', 'Top 250 movies', 'Genre95P1', 'Recently added', 'Recent'])
+            ->assertSee('list=top', false);
+
+        $this->get('/?list=top&page=3')->assertOk()
+            ->assertSeeInOrder(['Top 250 movies', 'Genre95P3'])
+            ->assertSee('list=top&amp;page=4', false);
+    }
 }

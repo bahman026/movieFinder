@@ -35,6 +35,8 @@
         .sources a.on { background:var(--accent); color:#fff; }
         .slider { display:flex; gap:12px; overflow-x:auto; padding-bottom:8px; margin-bottom:16px; }
         .slider .card { flex:0 0 140px; }
+        .row-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+        .row-head a { color:var(--accent); text-decoration:none; font-size:14px; white-space:nowrap; }
         .subs form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
         select, input[type=number] { padding:7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
         input[type=number] { width:80px; }

@@ -42,23 +42,51 @@ class DelfanClient
     /** Landing rows, flattened and de-duplicated by id. */
     public function home(): array
     {
-        return $this->locked(function () {
+        $seen = [];
+        $items = [];
+        foreach ($this->homeRows() as $row) {
+            foreach ($row as $it) {
+                if ($it['id'] === '' || isset($seen[$it['id']])) {
+                    continue;
+                }
+                $seen[$it['id']] = true;
+                $items[] = $it;
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * The landing rows as the app groups them, plus "top": every title on the
+     * landing page ordered by IMDb rating. The API has no top-rated endpoint
+     * (its sort_by values are unknown), so this is the best of what is new.
+     *
+     * @return array{new_movies: array, new_series: array, updated_series: array, featured: array, top: array}
+     */
+    public function homeRows(): array
+    {
+        $rows = $this->locked(function () {
             $resp = $this->roundtrip('vitrin', []);
-            $seen = [];
-            $items = [];
-            foreach (['NewMovie', 'NewSerie', 'updated_serie', 'vige'] as $group) {
-                foreach ($resp[$group] ?? [] as $it) {
-                    $id = (string) ($it['videos_id'] ?? '');
-                    if ($id === '' || isset($seen[$id])) {
-                        continue;
-                    }
-                    $seen[$id] = true;
-                    $items[] = $this->item($it);
+            $map = fn ($g) => array_values(array_filter(array_map(fn ($it) => $this->item($it), $resp[$g] ?? []), fn ($it) => $it['id'] !== ''));
+
+            return ['new_movies' => $map('NewMovie'), 'new_series' => $map('NewSerie'),
+                'updated_series' => $map('updated_serie'), 'featured' => $map('vige')];
+        });
+
+        $all = [];
+        foreach ($rows as $row) {
+            foreach ($row as $it) {
+                if ((float) $it['rating'] > 0) {
+                    $all[$it['id']] ??= $it;
                 }
             }
+        }
+        $all = array_values($all);
+        usort($all, fn ($a, $b) => (float) $b['rating'] <=> (float) $a['rating']);
+        $rows['top'] = array_slice($all, 0, 20);
 
-            return $items;
-        });
+        return $rows;
     }
 
     public function search(string $query, int $page = 1): array

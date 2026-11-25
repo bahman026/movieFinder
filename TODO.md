@@ -66,9 +66,12 @@ signing as `internal/delfan` in the Go desktop app, and shows the results as web
 
 - [ ] Delfan search filters (`type`, `genre`, `year_from`/`year_to`, `imdb`, `sort_by`): the accepted values are
       not known yet. Read them from the app or capture real requests before adding a form.
-- [ ] Playstore genre pages: `get_movie_by_genre_id` needs a genre id, but detail responses only give genre
-      names and urls. Find where the ids come from.
-- [ ] Short shared cache for home and slider results
+- [x] Home page rows: Database 1 shows Newest movies / Top 250 movies / Top series from the API's curated
+      "genres" (`get_all_genre` gives the ids; "newest" picks the latest `آخرین های <year>`), each with a paged
+      "See all" (`/?list=newest|top|top-series`). Database 2 shows its landing groups plus "Top rated" (the
+      landing titles ordered by IMDb; it has no top-rated endpoint). Rows are cached 10 minutes, shared.
+- [ ] Playstore genre pages: ids come from `get_all_genre` (now used for the home rows); a genre browser is not built.
+- [ ] Short shared cache for the slider and the "Recently added" grid
 - [ ] Persian / RTL interface language
 - [ ] OpenSubtitles quota is per server IP on a website (5/day shared by all visitors). Show the remaining count,
       or default to my-subs.co (already the default).
