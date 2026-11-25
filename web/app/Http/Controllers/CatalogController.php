@@ -46,24 +46,41 @@ class CatalogController extends Controller
         return isset(self::SOURCES[$src]) ? $src : 'db1';
     }
 
+    /** Curated lists of Database 1 with their own "See all" pages (?list=). */
+    public const LISTS = ['newest' => 'Newest movies', 'top' => 'Top 250 movies', 'top-series' => 'Top series'];
+
     public function home(Request $request)
     {
         $src = $this->source($request);
         $q = trim((string) $request->query('q', ''));
         $page = max(1, (int) $request->query('page', 1));
+        $list = $src === 'db1' && $q === '' && isset(self::LISTS[(string) $request->query('list')])
+            ? (string) $request->query('list') : null;
         $slider = [];
+        $rows = [];
         $paged = true;
+        $heading = $q !== '' ? 'Results for “'.$q.'”' : ($list ? self::LISTS[$list] : 'Recently added');
 
         try {
             if ($src === 'db2') {
-                $items = $q === '' ? $this->delfan($request)->home() : $this->delfan($request)->search($q, $page);
-                $paged = $q !== '';
+                if ($q === '') {
+                    // The landing rows replace the flat grid; they are the whole page.
+                    $rows = $this->delfanRows($request);
+                    [$items, $paged, $heading] = [[], false, null];
+                } else {
+                    $items = $this->delfan($request)->search($q, $page);
+                }
             } else {
                 $pc = $this->playstore();
                 if ($q !== '') {
                     $items = $pc->search($q);
                     $paged = false; // playstore search is not paged
+                } elseif ($list) {
+                    $items = $pc->curated($list, $page);
                 } else {
+                    if ($page === 1) {
+                        $rows = $this->playstoreRows($pc);
+                    }
                     $items = $pc->movies($page);
                     if ($page === 1) {
                         try {
@@ -80,7 +97,46 @@ class CatalogController extends Controller
             $error = $this->explain($e, $src);
         }
 
-        return view('site.index', compact('items', 'slider', 'q', 'page', 'error', 'src', 'paged'));
+        return view('site.index', compact('items', 'slider', 'rows', 'q', 'page', 'error', 'src', 'paged', 'list', 'heading'));
+    }
+
+    /**
+     * The home rows of Database 1. Shared by every visitor and cached for ten
+     * minutes, so a busy front page costs three upstream calls, not three per view.
+     * A failing row is left out: rows are extras, the grid below is the page.
+     *
+     * @return list<array{title: string, items: array, more: ?string}>
+     */
+    private function playstoreRows(PlaystoreClient $pc): array
+    {
+        $rows = [];
+        foreach (self::LISTS as $key => $title) {
+            try {
+                $items = Cache::remember("home:db1:$key", 600, fn () => array_slice($pc->curated($key), 0, 20));
+            } catch (Throwable) {
+                continue;
+            }
+            if ($items) {
+                $rows[] = ['title' => $title, 'items' => $items, 'more' => route('home', ['list' => $key])];
+            }
+        }
+
+        return $rows;
+    }
+
+    /** @return list<array{title: string, items: array, more: ?string}> */
+    private function delfanRows(Request $request): array
+    {
+        $r = Cache::remember('home:db2', 600, fn () => $this->delfan($request)->homeRows());
+        $rows = [];
+        foreach (['new_movies' => 'Newest movies', 'new_series' => 'Newest series', 'top' => 'Top rated',
+            'updated_series' => 'Updated series', 'featured' => 'Featured'] as $key => $title) {
+            if (! empty($r[$key])) {
+                $rows[] = ['title' => $title, 'items' => $r[$key], 'more' => null];
+            }
+        }
+
+        return $rows;
     }
 
     public function show(Request $request, string $src, string $id)

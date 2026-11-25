@@ -44,4 +44,25 @@ class DelfanClientTest extends TestCase
     {
         $this->get('/title/db2/1/link/0')->assertNotFound();
     }
+
+    public function test_home_rows_keep_the_groups_and_rank_top_by_imdb(): void
+    {
+        Http::fake(function (Request $r) {
+            if (str_contains($r->url(), 'action=login')) {
+                return Http::response(['q1' => '1', 'q2' => '2', 'infos' => [['auth' => 'AUTH']]]);
+            }
+
+            return Http::response(['q1' => 10, 'q2' => 20,
+                'NewMovie' => [['videos_id' => '1', 'title' => 'A', 'imdb' => '6.1'], ['videos_id' => '2', 'title' => 'B', 'imdb' => '8.4']],
+                'NewSerie' => [['videos_id' => '3', 'title' => 'C', 'imdb' => '7.0'], ['videos_id' => '2', 'title' => 'B', 'imdb' => '8.4']],
+                'vige' => [['videos_id' => '4', 'title' => 'D', 'imdb' => '']],
+            ]);
+        });
+
+        $rows = (new DelfanClient($this->app['session.store'], config('delfan')))->homeRows();
+
+        $this->assertSame(['1', '2'], array_column($rows['new_movies'], 'id'));
+        $this->assertSame(['3', '2'], array_column($rows['new_series'], 'id'));
+        $this->assertSame(['2', '3', '1'], array_column($rows['top'], 'id')); // unrated and duplicates left out
+    }
 }

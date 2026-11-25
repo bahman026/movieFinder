@@ -47,6 +47,61 @@ class PlaystoreClient
         return array_map(fn ($m) => $this->item($m), $this->get('get_slider')['data'] ?? []);
     }
 
+    /**
+     * Curated lists the API publishes as "genres". Their ids are looked up by name,
+     * because the yearly ones rotate ("آخرین های 2026" gets a new id each year).
+     * The fallbacks are the ids seen live in November 2026.
+     */
+    public const LISTS = [
+        'newest' => ['pattern' => '/^آخرین\s*های\s*(\d{4})$/u', 'fallback' => '408'],
+        'top' => ['pattern' => '/250\s*فیلم\s*برتر/u', 'fallback' => '95'],
+        'top-series' => ['pattern' => '/250\s*سریال\s*برتر/u', 'fallback' => '401'],
+    ];
+
+    /** @return list<array{id: string, name: string}> */
+    public function genres(): array
+    {
+        return Cache::remember('playstore:genres', 21600, fn () => array_values(array_filter(array_map(
+            fn ($g) => ['id' => (string) ($g['genre_id'] ?? ''), 'name' => trim((string) ($g['name'] ?? ''))],
+            $this->list($this->get('get_all_genre'))
+        ), fn ($g) => $g['id'] !== '')));
+    }
+
+    public function byGenre(string $genreId, int $page = 1): array
+    {
+        return array_map(fn ($m) => $this->item($m),
+            $this->list($this->get('get_movie_by_genre_id', ['id' => $genreId, 'page' => max(1, $page)])));
+    }
+
+    /** One of LISTS, e.g. curated('top', 2). */
+    public function curated(string $list, int $page = 1): array
+    {
+        return $this->byGenre($this->listGenreId($list), $page);
+    }
+
+    /** The genre id behind a curated list; for "newest", the latest year's. */
+    public function listGenreId(string $list): string
+    {
+        $def = self::LISTS[$list] ?? throw new RuntimeException("Unknown list $list.");
+        try {
+            $genres = $this->genres();
+        } catch (\Throwable) {
+            return $def['fallback'];
+        }
+        $best = null;
+        $bestYear = -1;
+        foreach ($genres as $g) {
+            if (preg_match($def['pattern'], $g['name'], $m)) {
+                $year = (int) ($m[1] ?? 0);
+                if ($year > $bestYear) {
+                    [$best, $bestYear] = [$g['id'], $year];
+                }
+            }
+        }
+
+        return $best ?? $def['fallback'];
+    }
+
     public function details(string $kind, string $id): array
     {
         $kind = $kind === 'tvseries' ? 'tvseries' : 'movie';
